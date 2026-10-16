@@ -30,6 +30,83 @@ final class NativeJSONSaveUITests: XCTestCase {
         } while Date() < deadline
         try fail("Required accessible control not observed")
     }
+    private func morePageObserved() -> Bool {
+        let back = app.buttons.matching(NSPredicate(format: "label == %@", "홈으로 돌아가기"))
+            .allElementsBoundByIndex.filter { $0.exists }
+        let title = app.staticTexts.matching(NSPredicate(format: "label == %@", "더보기"))
+            .allElementsBoundByIndex.filter { $0.exists }
+        return back.count == 1 && title.count == 1
+    }
+    private func freshHomeMore() -> XCUIElement? {
+        guard app.state == .runningForeground else { return nil }
+        // Positive home evidence AND absence of More-page signals are required.
+        // No frame is used as a touch coordinate; it is only a stability check.
+        for label in ["홈으로 돌아가기", "백업·복원·휴지통"] {
+            if app.buttons.matching(NSPredicate(format: "label == %@", label)).count != 0 { return nil }
+        }
+        if app.staticTexts.matching(NSPredicate(format: "label == %@", "훈련 도구")).count != 0 { return nil }
+        let heading = app.staticTexts.matching(NSPredicate(format: "label == %@", "운동 분석과 훈련 계획"))
+            .allElementsBoundByIndex.filter { $0.exists && $0.isHittable }
+        guard heading.count == 1 else { return nil }
+        for label in ["훈련 계획 받기", "오늘 운동 기록 쓰기"] {
+            let hits = app.buttons.matching(NSPredicate(format: "label == %@", label))
+                .allElementsBoundByIndex.filter { $0.exists && $0.isHittable }
+            guard hits.count == 1 else { return nil }
+        }
+        let more = app.buttons.matching(NSPredicate(format: "label == %@", "더보기"))
+            .allElementsBoundByIndex.filter { $0.exists }
+        guard more.count == 1, more[0].isHittable,
+              more[0].frame.width > 0, more[0].frame.height > 0 else { return nil }
+        return more[0]
+    }
+    private func stableHomeMore(timeout: TimeInterval) -> XCUIElement? {
+        let deadline = Date().addingTimeInterval(timeout)
+        var previousFrame = app.frame
+        var stableSamples = 0
+        repeat {
+            guard !morePageObserved() else { return nil }
+            if let button = freshHomeMore() {
+                stableSamples = button.frame == previousFrame ? stableSamples + 1 : 1
+                previousFrame = button.frame
+                if stableSamples >= 3 { return button }
+            } else { stableSamples = 0 }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+        } while Date() < deadline
+        return nil
+    }
+    private func waitForMorePage(timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            if morePageObserved() { return true }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.25))
+        } while Date() < deadline
+        return false
+    }
+    private func openMoreWithOneConditionalRecovery() throws {
+        guard stableHomeMore(timeout: 60) != nil else {
+            try fail("more-home-ax-not-stable")
+        }
+        evidence("more-before-first-tap-stable-home")
+        guard let first = freshHomeMore() else { try fail("more-home-changed-before-tap") }
+        first.tap() // One initial navigation action, never an export/save retry.
+        if waitForMorePage(timeout: 20) { evidence("more-after-first-tap-opened"); return }
+        evidence("more-after-first-tap-no-navigation")
+        // A retry is permitted ONLY after fresh observations prove unchanged
+        // HOME, a unique hittable More button, and no More-page signals.
+        if morePageObserved() { return }
+        guard stableHomeMore(timeout: 8) != nil else {
+            try fail("more-tap-no-navigation: unchanged-home-not-proven")
+        }
+        evidence("more-before-single-press-retry")
+        if morePageObserved() { return }
+        guard let retry = freshHomeMore() else {
+            try fail("more-tap-no-navigation: home-changed-before-retry")
+        }
+        retry.press(forDuration: 0.1) // Sole allowed genuine navigation recovery.
+        if waitForMorePage(timeout: 20) { evidence("more-after-press-retry-opened"); return }
+        evidence("more-after-single-press-retry-no-navigation")
+        try fail("more-tap-no-navigation")
+    }
     private func backupButtonOnProvenMorePage() throws -> XCUIElement {
         // These two observed controls distinguish the opened More page from
         // the home screen's More button. No scrolling on an unproven page.
@@ -69,7 +146,7 @@ final class NativeJSONSaveUITests: XCTestCase {
         guard app.wait(for: .runningForeground, timeout: 30) else { try fail("Preinstalled app did not foreground") }
         evidence("app-home")
         // Export only. Never tap restore, import, clear, delete, trash or reset.
-        try unique(app.buttons, labels: ["더보기"], timeout: 40).tap()
+        try openMoreWithOneConditionalRecovery()
         try backupButtonOnProvenMorePage().tap()
         evidence("safe-backup-page")
         try unique(app.buttons, labels: ["내 일지 데이터 내려받기 (JSON)"], timeout: 40).tap()

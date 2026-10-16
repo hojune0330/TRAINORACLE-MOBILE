@@ -39,4 +39,4 @@ jobs:
           path: publisher/output/
           if-no-files-found: warn
           retention-days: 1
-          compression-level: 9
+          compression-level: 0
