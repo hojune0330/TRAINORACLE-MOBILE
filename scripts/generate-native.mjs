@@ -103,6 +103,21 @@ export function transformBridge(text, probe) {
     }
     #endif`, 'NativeBridgeViewController');
 }
+export function transformSceneDelegate(text) {
+  // Capacitor 8.5.3's scene template creates its root programmatically. The
+  // storyboard alone does not select our subclass for this live scene path.
+  const factory = /window\?\.rootViewController\s*=\s*CAPBridgeViewController\(\)/g;
+  if (!/class SceneDelegate: UIResponder, UIWindowSceneDelegate\s*\{/.test(text) || [...text.matchAll(factory)].length !== 1 || !text.includes('window = UIWindow(windowScene: windowScene)') || !text.includes('window?.makeKeyAndVisible()') || !text.includes('SceneDelegateProxy.shared.scene(scene, willConnectTo: session, options: connectionOptions)')) throw new Error('Unexpected SceneDelegate root factory');
+  return text.replace(factory, 'window?.rootViewController = NativeBridgeViewController()');
+}
+export function transformAppDelegate(text, probe) {
+  if (!probe) return text;
+  if (!/@UIApplicationMain\s+class AppDelegate: UIResponder, UIApplicationDelegate\s*\{/.test(text) || text.includes('NativeAppLifecycleTrace')) throw new Error('Unexpected AppDelegate entry template');
+  const launch = /func application\(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: \[UIApplication\.LaunchOptionsKey: Any\]\?\) -> Bool\s*\{([\s\S]*?)\n    \}/g;
+  const matches = [...text.matchAll(launch)];
+  if (matches.length !== 1 || matches[0][1].replace(/\/\/[^\n]*/g, '').trim() !== 'return true') throw new Error('Unexpected AppDelegate didFinishLaunching body');
+  return text.replace(launch, method => method.replace(/\{/, '{\n        #if DEBUG && TRAINORACLE_NATIVE_CI_PROBE\n        NativeAppLifecycleTrace.install()\n        #endif'));
+}
 export function configureXcode(project, release, sources, resources) {
   const objects = project.hash.project.objects;
   const entries = section => Object.entries(section || {}).filter(([key]) => !key.endsWith('_comment'));
@@ -171,6 +186,7 @@ export async function generateNative({ platform, wrapperRoot = WRAPPER_ROOT }, {
   const probe = platform === 'ios' && await exists(join(root, 'native-probe/NativeReleaseProbe.swift'));
   if (probe) {
     await safeTree(join(root, 'native-probe/NativeReleaseProbe.swift'));
+    await safeTree(join(root, 'native-probe/NativeAppLifecycleTrace.swift'));
     const sdkController = await readFile(join(root, 'node_modules/@capacitor/ios/Capacitor/Capacitor/CAPBridgeViewController.swift'), 'utf8');
     if (!/override\s+open\s+func\s+viewDidAppear\(_ animated: Bool\)/.test(sdkController)) throw new Error('Installed SDK viewDidAppear is not verified overridable');
   }
@@ -231,10 +247,17 @@ export async function generateNative({ platform, wrapperRoot = WRAPPER_ROOT }, {
     const require = createRequire(join(root, 'package.json'));
     const plist = require('plist');
     for (const file of ['NativeDocumentsPlugin.swift', 'NativeBridgeViewController.swift']) await writeNative('App/App/' + file, file.startsWith('NativeBridge') ? transformBridge(await readFile(join(root, 'native-templates/ios', file), 'utf8'), probe) : await readFile(join(root, 'native-templates/ios', file)));
-    if (probe) await copy(join(root, 'native-probe/NativeReleaseProbe.swift'), 'App/App/NativeReleaseProbe.swift');
+    if (probe) {
+      await copy(join(root, 'native-probe/NativeReleaseProbe.swift'), 'App/App/NativeReleaseProbe.swift');
+      await copy(join(root, 'native-probe/NativeAppLifecycleTrace.swift'), 'App/App/NativeAppLifecycleTrace.swift');
+      await editNative('App/App/AppDelegate.swift', text => transformAppDelegate(text, true));
+    }
     for (const asset of ['AppIcon.appiconset', 'Splash.imageset']) await copy(join(root, 'resources/ios', asset), 'App/App/Assets.xcassets/' + asset);
     await copy(join(root, 'resources/ios/PrivacyInfo.xcprivacy'), 'App/App/PrivacyInfo.xcprivacy');
     await editNative('App/App/Base.lproj/Main.storyboard', transformStoryboard);
+    const appDelegate = await readFile(join(native, 'App/App/AppDelegate.swift'), 'utf8');
+    if (!appDelegate.includes('config.delegateClass = SceneDelegate.self')) throw new Error('Unexpected configured SceneDelegate');
+    await editNative('App/App/SceneDelegate.swift', transformSceneDelegate);
     await editNative('App/CapApp-SPM/Package.swift', transformSwiftPackage);
     await editNative('App/App/Info.plist', text => {
       const info = plist.parse(text);
@@ -251,7 +274,7 @@ export async function generateNative({ platform, wrapperRoot = WRAPPER_ROOT }, {
     });
     const projectPath = join(native, 'App/App.xcodeproj/project.pbxproj');
     const project = require('xcode').project(projectPath); project.parseSync();
-    configureXcode(project, release, ['NativeDocumentsPlugin.swift', 'NativeBridgeViewController.swift', ...(probe ? ['NativeReleaseProbe.swift'] : [])], ['PrivacyInfo.xcprivacy']);
+    configureXcode(project, release, ['NativeDocumentsPlugin.swift', 'NativeBridgeViewController.swift', ...(probe ? ['NativeReleaseProbe.swift', 'NativeAppLifecycleTrace.swift'] : [])], ['PrivacyInfo.xcprivacy']);
     await writeNative('App/App.xcodeproj/project.pbxproj', project.writeSync());
     for (const file of await allFiles(native)) if (/\.entitlements$/.test(file) && /healthkit|icloud|ubiquity/i.test(await readFile(join(native, file), 'utf8'))) throw new Error('Forbidden entitlement');
   }

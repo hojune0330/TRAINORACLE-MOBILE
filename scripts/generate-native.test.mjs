@@ -6,7 +6,7 @@ import { join, dirname } from 'node:path';
 import { createRequire } from 'node:module';
 import { gunzipSync } from 'node:zlib';
 import { createHash } from 'node:crypto';
-import { VERSIONS, validateConfiguration, transformMainActivity, transformVariables, transformAndroidGradle, transformManifest, DATA_EXTRACTION_RULES, BACKUP_DOMAINS, transformStoryboard, transformSwiftPackage, transformBridge, configureXcode, generateNative, parseArgs } from './generate-native.mjs';
+import { VERSIONS, validateConfiguration, transformMainActivity, transformVariables, transformAndroidGradle, transformManifest, DATA_EXTRACTION_RULES, BACKUP_DOMAINS, transformStoryboard, transformSwiftPackage, transformBridge, transformAppDelegate, transformSceneDelegate, configureXcode, generateNative, parseArgs } from './generate-native.mjs';
 import { prepareOutput, SOURCE_SHA, WRAPPER_ROOT } from './prepare-web.mjs';
 const require = createRequire(import.meta.url);
 const release = JSON.parse(await readFile(join(WRAPPER_ROOT, 'release-config.json'), 'utf8'));
@@ -117,9 +117,9 @@ test('actual xcode 3.0.1 parser registers App Sources and privacy Resources, str
   const dir = await mkdtemp(join(tmpdir(), 'trainoracle-pbx-test-')), file = join(dir, 'project.pbxproj');
   await writeFile(file, ios['App/App.xcodeproj/project.pbxproj']);
   const project = require('xcode').project(file); project.parseSync();
-  configureXcode(project, release, ['NativeBridgeViewController.swift', 'NativeDocumentsPlugin.swift', 'NativeReleaseProbe.swift'], ['PrivacyInfo.xcprivacy']);
+  configureXcode(project, release, ['NativeBridgeViewController.swift', 'NativeDocumentsPlugin.swift', 'NativeReleaseProbe.swift', 'NativeAppLifecycleTrace.swift'], ['PrivacyInfo.xcprivacy']);
   const out = project.writeSync();
-  for (const name of ['NativeBridgeViewController.swift', 'NativeDocumentsPlugin.swift', 'NativeReleaseProbe.swift']) assert.ok(out.includes(name + ' in Sources'));
+  for (const name of ['NativeBridgeViewController.swift', 'NativeDocumentsPlugin.swift', 'NativeReleaseProbe.swift', 'NativeAppLifecycleTrace.swift']) assert.ok(out.includes(name + ' in Sources'));
   assert.ok(out.includes('PrivacyInfo.xcprivacy in Resources'));
   const objects = project.hash.project.objects;
   const targetEntry = Object.entries(objects.PBXNativeTarget).find(([id, t]) => !id.endsWith('_comment') && String(t.name).replaceAll('"', '') === 'App');
@@ -130,7 +130,7 @@ test('actual xcode 3.0.1 parser registers App Sources and privacy Resources, str
     const build = objects.PBXBuildFile[ref.value];
     return String(objects.PBXFileReference[build.fileRef].path).replaceAll('"', '');
   });
-  for (const name of ['NativeBridgeViewController.swift', 'NativeDocumentsPlugin.swift', 'NativeReleaseProbe.swift']) assert.ok(compiledNames.includes(name), name + ' must be in the actual App Sources phase');
+  for (const name of ['NativeBridgeViewController.swift', 'NativeDocumentsPlugin.swift', 'NativeReleaseProbe.swift', 'NativeAppLifecycleTrace.swift']) assert.ok(compiledNames.includes(name), name + ' must be in the actual App Sources phase');
   assert.doesNotMatch(out, /DEVELOPMENT_TEAM|PROVISION|CODE_SIGN|ProvisioningStyle/);
   assert.doesNotMatch(out, /IPHONEOS_DEPLOYMENT_TARGET = 15/);
   assert.match(out, /TARGETED_DEVICE_FAMILY = 1/);
@@ -210,4 +210,59 @@ test('installed Capacitor lifecycle provides the real bridge WebView before capa
   const didLoad = controller.match(/override open func viewDidLoad\(\)\s*\{[\s\S]*?\n    \}/)?.[0];
   assert.match(didLoad, /super.viewDidLoad\(\)\s+loadWebView\(\)/);
   assert.match(controller, /public final func loadWebView\(\)[\s\S]*?webView\?\.load\(URLRequest/);
+});
+
+test('real scene factory uses the production NativeBridge subclass, not an unused storyboard assumption', () => {
+  const original = text(ios, 'App/App/SceneDelegate.swift');
+  const out = transformSceneDelegate(original);
+  assert.equal(out.replace('window?.rootViewController = NativeBridgeViewController()', 'window?.rootViewController = CAPBridgeViewController()'), original);
+  assert.equal((out.match(/rootViewController\s*=\s*NativeBridgeViewController\(\)/g) || []).length, 1);
+  assert.doesNotMatch(out, /rootViewController\s*=\s*CAPBridgeViewController/);
+  assert.ok(out.indexOf('NativeBridgeViewController()') < out.indexOf('window?.makeKeyAndVisible()'));
+  assert.match(out, /SceneDelegateProxy.shared.scene\(scene, willConnectTo: session, options: connectionOptions\)/);
+  assert.match(text(ios, 'App/App/AppDelegate.swift'), /config.delegateClass = SceneDelegate.self/);
+  const info = require('plist').parse(text(ios, 'App/App/Info.plist'));
+  assert.equal(info.UIApplicationSceneManifest.UISceneConfigurations.UIWindowSceneSessionRoleApplication[0].UISceneDelegateClassName, '$(PRODUCT_MODULE_NAME).SceneDelegate');
+  assert.throws(() => transformSceneDelegate(out), /Unexpected SceneDelegate/);
+  assert.throws(() => transformSceneDelegate(original.replace('CAPBridgeViewController()', 'OtherController()')), /Unexpected SceneDelegate/);
+});
+
+test('CI AppDelegate injection preserves every original return and scene behavior, fails on template drift', () => {
+  const original = text(ios, 'App/App/AppDelegate.swift');
+  assert.equal(transformAppDelegate(original, false), original);
+  const injected = '\n        #if DEBUG && TRAINORACLE_NATIVE_CI_PROBE\n        NativeAppLifecycleTrace.install()\n        #endif';
+  const out = transformAppDelegate(original, true);
+  assert.equal(out.replace(injected, ''), original);
+  assert.equal((out.match(/NativeAppLifecycleTrace.install\(\)/g) || []).length, 1);
+  const entry = out.match(/didFinishLaunchingWithOptions[\s\S]*?\n    \}/)?.[0];
+  assert.ok(entry.indexOf('NativeAppLifecycleTrace.install()') < entry.indexOf('return true'));
+  assert.throws(() => transformAppDelegate(original.replace('return true', 'return false'), true), /Unexpected AppDelegate/);
+  assert.throws(() => transformAppDelegate(out, true), /Unexpected AppDelegate/);
+});
+
+test('CI lifecycle tracer is wholly dual-macro guarded, records no signal values or user data, and uses the real view tree', async () => {
+  const trace = await readFile(join(WRAPPER_ROOT, 'native-probe/NativeAppLifecycleTrace.swift'), 'utf8');
+  assert.match(trace, /^#if DEBUG && TRAINORACLE_NATIVE_CI_PROBE\n[\s\S]*\n#endif\s*$/);
+  assert.equal(trace.replace(/^#if DEBUG && TRAINORACLE_NATIVE_CI_PROBE\n[\s\S]*\n#endif\s*$/, ''), '');
+  assert.match(trace, /UIApplication.didBecomeActiveNotification/);
+  assert.match(trace, /DispatchQueue.main.async \{ snapshot\(discoverWindow: true\) \}/);
+  assert.match(trace, /snapshot\(discoverWindow: false\)/);
+  assert.match(trace, /app.connectedScenes/);
+  assert.match(trace, /\.isKeyWindow/);
+  assert.match(trace, /window\?\.rootViewController/);
+  assert.match(trace, /\$0 is NativeBridgeViewController/);
+  assert.match(trace, /view as\? WKWebView/);
+  assert.match(trace, /pending.append\(contentsOf: view.subviews\)/);
+  assert.match(trace, /NativeReleaseProbe.attach\(to: webView\)/);
+  assert.match(trace, /\.cachesDirectory/);
+  assert.match(trace, /appendingPathComponent\("TrainOracleNativeCI"/);
+  assert.match(trace, /appendingPathComponent\("native-app-lifecycle.json"\)/);
+  assert.doesNotMatch(trace, /evaluateJavaScript|callAsyncJavaScript|\.rootViewController\s*=|loadViewIfNeeded|setResourceValues|\.text\b|accessibilityLabel|absoluteString|contentsOfDirectory/);
+  assert.doesNotMatch(trace, /result\[[^\]]+\]\s*=\s*(?:arguments|phase|argumentPhase)\b/);
+  assert.match(trace, /"environmentPhaseRecognized": phase.map/);
+  assert.match(trace, /"argumentFlagPresent": flag != nil/);
+  const generator = await readFile(join(WRAPPER_ROOT, 'scripts/generate-native.mjs'), 'utf8');
+  assert.match(generator, /copy\(join\(root, 'native-probe\/NativeAppLifecycleTrace.swift'\), 'App\/App\/NativeAppLifecycleTrace.swift'\)/);
+  assert.match(generator, /\['NativeReleaseProbe.swift', 'NativeAppLifecycleTrace.swift'\]/);
+  assert.doesNotMatch(generator, /SWIFT_ACTIVE_COMPILATION_CONDITIONS.*TRAINORACLE_NATIVE_CI_PROBE/);
 });

@@ -6,6 +6,20 @@ import WebKit
 // Explicit CI activation only. No user fields, keys, journal values or credentials.
 @MainActor
 enum NativeReleaseProbe {
+    private static var attached=Set<ObjectIdentifier>()
+    private static func requestedFilePhase() -> String? {
+        #if TRAINORACLE_NATIVE_CI_PROBE
+        let url=URL(fileURLWithPath:NSHomeDirectory()).appendingPathComponent("Library/Caches/TrainOracleNativeCI/native-probe-request.json")
+        guard let handle=try? FileHandle(forReadingFrom:url) else { return nil }
+        defer { try? handle.close() }
+        guard let data=try? handle.read(upToCount:1025), data.count <= 1024,
+              let request=(try? JSONSerialization.jsonObject(with:data)) as? [String:Any],
+              let phase=request["phase"] as? String, ["write","read"].contains(phase) else { return nil }
+        return phase
+        #else
+        return nil
+        #endif
+    }
     private final class State {
         let phase: String
         var stage="activated"
@@ -17,9 +31,13 @@ enum NativeReleaseProbe {
         let environmentPhase=ProcessInfo.processInfo.environment["TRAINORACLE_NATIVE_PROBE"]
         let arguments=ProcessInfo.processInfo.arguments
         let flagIndex=arguments.firstIndex(of: "--trainoracle-native-probe")
-        guard environmentPhase != nil || flagIndex != nil else { return }
         let argumentPhase=flagIndex.flatMap { index in arguments.indices.contains(index+1) ? arguments[index+1] : nil }
-        let phase=environmentPhase.flatMap { valid.contains($0) ? $0 : nil } ?? argumentPhase.flatMap { valid.contains($0) ? $0 : nil }
+        let filePhase=requestedFilePhase()
+        let phase=environmentPhase.flatMap { valid.contains($0) ? $0 : nil } ?? argumentPhase.flatMap { valid.contains($0) ? $0 : nil } ?? filePhase
+        #if TRAINORACLE_NATIVE_CI_PROBE
+        write(["attachReached":true,"environmentPhasePresent":environmentPhase != nil,"argumentFlagPresent":flagIndex != nil,"filePhaseAccepted":filePhase != nil,"phaseAccepted":phase != nil,"webViewPresent":webView != nil], file:"native-probe-signal.json")
+        #endif
+        guard environmentPhase != nil || flagIndex != nil || filePhase != nil else { return }
         var responder: UIResponder?=webView
         var controllerClass="none"
         while let current=responder {
@@ -31,6 +49,7 @@ enum NativeReleaseProbe {
             write(["probeReady":false,"failure":phase == nil ? "activation-phase-invalid" : "webview-missing"])
             return
         }
+        guard attached.insert(ObjectIdentifier(webView)).inserted else { return }
         let state=State(phase: phase)
         stage("activated", state: state)
         // Independent wall-clock deadline: a missing JS callback cannot suppress failure.
@@ -121,7 +140,7 @@ enum NativeReleaseProbe {
         }
     }
     private static func write(_ value: [String: Any], file: String="native-release-probe.json") {
-        guard ["native-release-probe.json","native-probe-activation.json","native-probe-progress.json"].contains(file),
+        guard ["native-release-probe.json","native-probe-activation.json","native-probe-progress.json","native-probe-signal.json"].contains(file),
               let cache=FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first,
               let bytes=try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]) else { return }
         // Only public boolean diagnostics in our own CI cache folder, never user records.

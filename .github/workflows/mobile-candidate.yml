@@ -144,7 +144,7 @@ jobs:
         run: node scripts/generate-native.mjs --platform ios
       - name: Compile simulator app (not an App Store IPA)
         run: |
-          xcodebuild -project ios/App/App.xcodeproj -scheme App -configuration Debug -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath "$RUNNER_TEMP/trainoracle-derived" CODE_SIGNING_ALLOWED=NO build > output/ios-build.log 2>&1 || { tail -n 100 output/ios-build.log; exit 1; }
+          xcodebuild -project ios/App/App.xcodeproj -scheme App -configuration Debug -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath "$RUNNER_TEMP/trainoracle-derived" CODE_SIGNING_ALLOWED=NO 'SWIFT_ACTIVE_COMPILATION_CONDITIONS=DEBUG TRAINORACLE_NATIVE_CI_PROBE' build > output/ios-build.log 2>&1 || { tail -n 100 output/ios-build.log; exit 1; }
           ditto -c -k --sequesterRsrc --keepParent "$RUNNER_TEMP/trainoracle-derived/Build/Products/Debug-iphonesimulator/App.app" output/TrainOracle-ios-SIMULATOR.zip
       - name: Real WebKit capability, storage and reinstall persistence probe
         run: |
@@ -164,14 +164,20 @@ jobs:
           xcrun simctl bootstatus "$DEVICE" -b
           xcrun simctl status_bar "$DEVICE" override --time '9:41' --dataNetwork wifi --wifiMode active --wifiBars 3 --batteryState charged --batteryLevel 100
           xcrun simctl install "$DEVICE" "$APP"
+          DATA=$(xcrun simctl get_app_container "$DEVICE" io.trainoracle.app.debug data)
+          mkdir -p "$DATA/Library/Caches/TrainOracleNativeCI"
+          printf '%s\n' '{"phase":"write"}' > "$DATA/Library/Caches/TrainOracleNativeCI/native-probe-request.json"
           SIMCTL_CHILD_TRAINORACLE_NATIVE_PROBE=write xcrun simctl launch --terminate-running-process "$DEVICE" io.trainoracle.app.debug --trainoracle-native-probe write
           DATA=$(xcrun simctl get_app_container "$DEVICE" io.trainoracle.app.debug data)
           for i in {1..180}; do [ -f "$DATA/Library/Caches/TrainOracleNativeCI/native-release-probe.json" ] && break; sleep 1; done
           cp "$DATA/Library/Caches/TrainOracleNativeCI/native-release-probe.json" output/native-ios-probe-write.json
           xcrun simctl terminate "$DEVICE" io.trainoracle.app.debug
+          rm -f "$DATA/Library/Caches/TrainOracleNativeCI/native-probe-request.json"
           xcrun simctl install "$DEVICE" "$APP"
           DATA=$(xcrun simctl get_app_container "$DEVICE" io.trainoracle.app.debug data)
           rm -f "$DATA/Library/Caches/TrainOracleNativeCI/native-release-probe.json"
+          mkdir -p "$DATA/Library/Caches/TrainOracleNativeCI"
+          printf '%s\n' '{"phase":"read"}' > "$DATA/Library/Caches/TrainOracleNativeCI/native-probe-request.json"
           SIMCTL_CHILD_TRAINORACLE_NATIVE_PROBE=read xcrun simctl launch --terminate-running-process "$DEVICE" io.trainoracle.app.debug --trainoracle-native-probe read
           for i in {1..180}; do [ -f "$DATA/Library/Caches/TrainOracleNativeCI/native-release-probe.json" ] && break; sleep 1; done
           cp "$DATA/Library/Caches/TrainOracleNativeCI/native-release-probe.json" output/native-ios-probe-read.json
@@ -192,7 +198,7 @@ jobs:
           if [ -f output/simulator-udid.txt ]; then
             DEVICE=$(cat output/simulator-udid.txt)
             DATA=$(xcrun simctl get_app_container "$DEVICE" io.trainoracle.app.debug data 2>/dev/null || true)
-            for FILE in native-probe-activation.json native-probe-progress.json; do
+            for FILE in native-probe-activation.json native-probe-progress.json native-probe-signal.json native-app-lifecycle.json; do
               if [ -n "$DATA" ] && [ -f "$DATA/Library/Caches/TrainOracleNativeCI/$FILE" ]; then cp "$DATA/Library/Caches/TrainOracleNativeCI/$FILE" "output/$FILE"; fi
             done
             xcrun simctl spawn "$DEVICE" log show --last 15m --info --debug --style compact --predicate 'eventMessage BEGINSWITH "TrainOracleNativeProbe:"' > output/native-ios-probe-lifecycle.log 2>/dev/null || true
