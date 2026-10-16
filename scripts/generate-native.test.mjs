@@ -94,13 +94,24 @@ test('iOS storyboard and exact SwiftPM pin preserve local App package references
   assert.match(result, /exact: "8.5.3"/); assert.match(result, /\.iOS\("16.0"\)/); assert.ok(result.includes('path: "../../../node_modules/@capacitor/app"'));
   assert.throws(() => transformSwiftPackage('unknown'));
 });
-test('DEBUG probe call is generated only on copied bridge text', async () => {
+test('DEBUG probe runs once after super.viewDidAppear, never capacitorDidLoad; backup prep remains before WebView', async () => {
   const original = await readFile(join(WRAPPER_ROOT, 'native-templates/ios/NativeBridgeViewController.swift'), 'utf8');
   const withoutProbe = transformBridge(original, false);
   assert.match(withoutProbe, /override func instanceDescriptor\(\) -> InstanceDescriptor\s*\{\s*NativeStoreBackupPreparation.prepareBeforeWebViewCreation\(\)\s*return super.instanceDescriptor\(\)/);
   assert.doesNotMatch(withoutProbe, /NativeReleaseProbe.attach/);
   assert.equal(await readFile(join(WRAPPER_ROOT, 'native-templates/ios/NativeBridgeViewController.swift'), 'utf8'), original);
-  assert.match(transformBridge(original, true), /#if DEBUG\s+NativeReleaseProbe.attach\(to: bridge\?\.webView\)\s+#endif/);
+  const withProbe = transformBridge(original, true);
+  assert.match(withProbe, /#if DEBUG\s+private var nativeReleaseProbeAttached = false\s+override func viewDidAppear\(_ animated: Bool\)\s*\{\s*super.viewDidAppear\(animated\)\s*guard !nativeReleaseProbeAttached else \{ return \}\s*nativeReleaseProbeAttached = true\s*NativeReleaseProbe.attach\(to: bridge\?\.webView\)\s*\}\s*#endif/);
+  assert.equal((withProbe.match(/NativeReleaseProbe\.attach\(/g) || []).length, 1);
+  const loadHook = withProbe.match(/override func capacitorDidLoad\(\)\s*\{[\s\S]*?\n    \}/)?.[0];
+  assert.ok(loadHook);
+  assert.match(loadHook, /bridge\?\.registerPluginInstance\(NativeDocumentsPlugin\(\)\)/);
+  assert.doesNotMatch(loadHook, /NativeReleaseProbe|evaluateJavaScript|callAsyncJavaScript/);
+  const prepHook = /override func instanceDescriptor\(\) -> InstanceDescriptor\s*\{[\s\S]*?\n    \}/;
+  assert.equal(withProbe.match(prepHook)?.[0], withoutProbe.match(prepHook)?.[0]);
+  const releaseText = withProbe.replace(/#if DEBUG[\s\S]*?#endif/g, '');
+  assert.doesNotMatch(releaseText, /NativeReleaseProbe|nativeReleaseProbeAttached|override func viewDidAppear/);
+  assert.throws(() => transformBridge(original.replace('override func capacitorDidLoad()', 'override func viewDidAppear(_ animated: Bool) {}\n    override func capacitorDidLoad()'), true), /preexisting probe appearance/);
 });
 test('actual xcode 3.0.1 parser registers App Sources and privacy Resources, strips signing', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'trainoracle-pbx-test-')), file = join(dir, 'project.pbxproj');
@@ -194,4 +205,9 @@ test('installed Capacitor lifecycle provides the real bridge WebView before capa
   assert.match(controller, /public var bridgedWebView: WKWebView\?\s*\{\s*return webView/);
   assert.match(bridge, /public var webView: WKWebView\?\s*\{\s*return bridgeDelegate\?\.bridgedWebView/);
   assert.match(controller, /webView = aWebView/);
+  assert.match(controller, /override open func viewDidAppear\(_ animated: Bool\)\s*\{\s*super.viewDidAppear\(animated\)/);
+  assert.doesNotMatch(controller, /(?:final\s+func|func\s+final)\s+viewDidAppear/);
+  const didLoad = controller.match(/override open func viewDidLoad\(\)\s*\{[\s\S]*?\n    \}/)?.[0];
+  assert.match(didLoad, /super.viewDidLoad\(\)\s+loadWebView\(\)/);
+  assert.match(controller, /public final func loadWebView\(\)[\s\S]*?webView\?\.load\(URLRequest/);
 });

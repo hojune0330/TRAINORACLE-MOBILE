@@ -87,7 +87,21 @@ export function transformBridge(text, probe) {
   // Capacitor 8.5.3 final loadView invokes instanceDescriptor first, before
   // constructing WKWebViewConfiguration, WKWebsiteDataStore or the WebView.
   text = text.replace(/final class NativeBridgeViewController: CAPBridgeViewController\s*\{/, 'final class NativeBridgeViewController: CAPBridgeViewController {\n    override func instanceDescriptor() -> InstanceDescriptor {\n        NativeStoreBackupPreparation.prepareBeforeWebViewCreation()\n        return super.instanceDescriptor()\n    }');
-  return probe ? text.replace(/override func capacitorDidLoad\(\)\s*\{/, 'override func capacitorDidLoad() {\n        #if DEBUG\n        NativeReleaseProbe.attach(to: bridge?.webView)\n        #endif') : text;
+  if (!probe) return text;
+  if (/override func viewDidAppear|nativeReleaseProbeAttached|NativeReleaseProbe\.attach/.test(text)) throw new Error('Unexpected preexisting probe appearance hook');
+  // capacitorDidLoad precedes viewDidLoad/loadWebView: the probe must not start
+  // JavaScript evaluation there. Appearance is after navigation was initiated.
+  // This repairs harness timing, not a claim that the prior failure is explained.
+  return replaceRequired(text, /final class NativeBridgeViewController: CAPBridgeViewController\s*\{/, `final class NativeBridgeViewController: CAPBridgeViewController {
+    #if DEBUG
+    private var nativeReleaseProbeAttached = false
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        guard !nativeReleaseProbeAttached else { return }
+        nativeReleaseProbeAttached = true
+        NativeReleaseProbe.attach(to: bridge?.webView)
+    }
+    #endif`, 'NativeBridgeViewController');
 }
 export function configureXcode(project, release, sources, resources) {
   const objects = project.hash.project.objects;
@@ -155,7 +169,11 @@ export async function generateNative({ platform, wrapperRoot = WRAPPER_ROOT }, {
   const required = platform === 'android' ? ['native-templates/android/NativeDocumentsPlugin.java', 'resources/android/res'] : ['native-templates/ios/NativeDocumentsPlugin.swift', 'native-templates/ios/NativeBridgeViewController.swift', 'resources/ios/AppIcon.appiconset', 'resources/ios/Splash.imageset', 'resources/ios/PrivacyInfo.xcprivacy'];
   for (const file of required) await safeTree(join(root, file));
   const probe = platform === 'ios' && await exists(join(root, 'native-probe/NativeReleaseProbe.swift'));
-  if (probe) await safeTree(join(root, 'native-probe/NativeReleaseProbe.swift'));
+  if (probe) {
+    await safeTree(join(root, 'native-probe/NativeReleaseProbe.swift'));
+    const sdkController = await readFile(join(root, 'node_modules/@capacitor/ios/Capacitor/Capacitor/CAPBridgeViewController.swift'), 'utf8');
+    if (!/override\s+open\s+func\s+viewDidAppear\(_ animated: Bool\)/.test(sdkController)) throw new Error('Installed SDK viewDidAppear is not verified overridable');
+  }
   if (await exists(join(root, 'output'))) await safeTree(join(root, 'output'));
   const metadataPath = join(root, 'output', 'native-generation-' + platform + '.json');
   if (await exists(metadataPath)) throw new Error('Existing generation metadata will not be overwritten');

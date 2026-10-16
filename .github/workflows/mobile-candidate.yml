@@ -166,14 +166,14 @@ jobs:
           xcrun simctl install "$DEVICE" "$APP"
           SIMCTL_CHILD_TRAINORACLE_NATIVE_PROBE=write xcrun simctl launch --terminate-running-process "$DEVICE" io.trainoracle.app.debug --trainoracle-native-probe write
           DATA=$(xcrun simctl get_app_container "$DEVICE" io.trainoracle.app.debug data)
-          for i in {1..80}; do [ -f "$DATA/Library/Caches/TrainOracleNativeCI/native-release-probe.json" ] && break; sleep 1; done
+          for i in {1..180}; do [ -f "$DATA/Library/Caches/TrainOracleNativeCI/native-release-probe.json" ] && break; sleep 1; done
           cp "$DATA/Library/Caches/TrainOracleNativeCI/native-release-probe.json" output/native-ios-probe-write.json
           xcrun simctl terminate "$DEVICE" io.trainoracle.app.debug
           xcrun simctl install "$DEVICE" "$APP"
           DATA=$(xcrun simctl get_app_container "$DEVICE" io.trainoracle.app.debug data)
           rm -f "$DATA/Library/Caches/TrainOracleNativeCI/native-release-probe.json"
           SIMCTL_CHILD_TRAINORACLE_NATIVE_PROBE=read xcrun simctl launch --terminate-running-process "$DEVICE" io.trainoracle.app.debug --trainoracle-native-probe read
-          for i in {1..80}; do [ -f "$DATA/Library/Caches/TrainOracleNativeCI/native-release-probe.json" ] && break; sleep 1; done
+          for i in {1..180}; do [ -f "$DATA/Library/Caches/TrainOracleNativeCI/native-release-probe.json" ] && break; sleep 1; done
           cp "$DATA/Library/Caches/TrainOracleNativeCI/native-release-probe.json" output/native-ios-probe-read.json
           xcrun simctl io "$DEVICE" screenshot output/trainoracle-ios-actual.png
           node --input-type=module <<'NODE'
@@ -190,7 +190,12 @@ jobs:
         if: always()
         run: |
           if [ -f output/simulator-udid.txt ]; then
-            xcrun simctl spawn "$(cat output/simulator-udid.txt)" log show --last 15m --style compact --predicate 'process == "App" AND eventMessage BEGINSWITH "TrainOracleNativeProbe:"' > output/native-ios-probe-lifecycle.log 2>/dev/null || true
+            DEVICE=$(cat output/simulator-udid.txt)
+            DATA=$(xcrun simctl get_app_container "$DEVICE" io.trainoracle.app.debug data 2>/dev/null || true)
+            for FILE in native-probe-activation.json native-probe-progress.json; do
+              if [ -n "$DATA" ] && [ -f "$DATA/Library/Caches/TrainOracleNativeCI/$FILE" ]; then cp "$DATA/Library/Caches/TrainOracleNativeCI/$FILE" "output/$FILE"; fi
+            done
+            xcrun simctl spawn "$DEVICE" log show --last 15m --info --debug --style compact --predicate 'eventMessage BEGINSWITH "TrainOracleNativeProbe:"' > output/native-ios-probe-lifecycle.log 2>/dev/null || true
           fi
       - name: Capture available simulator state on failure
         if: failure()
