@@ -91,10 +91,32 @@ export function centerFromBounds(bounds) {
 export function localSaveControls(xml) {
   const nodes = parseUiXml(xml);
   const owned = nodes.filter(node => /^(?:com\.google\.android\.documentsui|com\.android\.documentsui)$/.test(node.package || ''));
-  const downloads = owned.some(node => /^(?:Downloads?|다운로드)$/.test(node.text || '') && [...node.ancestors, node['resource-id'] || ''].some(id => /:id\/(?:toolbar|toolbar_title|directory_header|current_directory_name)$/.test(id)));
   const fields = owned.filter(node => node.class === 'android.widget.EditText' && node.enabled === 'true');
   const saves = owned.filter(node => /^(?:Save|SAVE|저장)$/.test(node.text || node['content-desc'] || '') && node.enabled === 'true' && node.clickable === 'true');
-  if (!downloads || fields.length !== 1 || saves.length !== 1) return null;
+  if (fields.length !== 1 || saves.length !== 1) return null;
+  const hasModernStructure = nodes.some(node => /:id\/(?:horizontal_breadcrumb|breadcrumb_text|header_title)$/.test(node['resource-id'] || ''));
+  if (hasModernStructure) {
+    // API 36 observed structure. An invalid modern breadcrumb must NEVER fall
+    // through to a toolbar title or a decoy Downloads item elsewhere in a list.
+    const roots = nodes.filter(node => /:id\/horizontal_breadcrumb$/.test(node['resource-id'] || ''));
+    const crumbs = nodes.filter(node => /:id\/breadcrumb_text$/.test(node['resource-id'] || ''));
+    const headers = nodes.filter(node => /:id\/header_title$/.test(node['resource-id'] || ''));
+    const containers = nodes.filter(node => /:id\/container_save$/.test(node['resource-id'] || ''));
+    if (roots.length !== 1 || crumbs.length !== 1 || headers.length !== 1 || containers.length !== 1) return null;
+    const root = roots[0], pkg = root.package;
+    if (!/^(?:com\.google\.android\.documentsui|com\.android\.documentsui)$/.test(pkg || '') || root['resource-id'] !== pkg + ':id/horizontal_breadcrumb') return null;
+    const insideRoot = nodes.filter(node => node.ancestors.includes(root['resource-id']));
+    if (insideRoot.some(node => node.package !== pkg) || insideRoot.filter(node => (node.text || '').trim()).length !== 1) return null;
+    if (crumbs[0].package !== pkg || crumbs[0]['resource-id'] !== pkg + ':id/breadcrumb_text' || crumbs[0].text !== 'Downloads' || !crumbs[0].ancestors.includes(root['resource-id'])) return null;
+    if (headers[0].package !== pkg || headers[0]['resource-id'] !== pkg + ':id/header_title' || headers[0].text !== 'Files in Downloads') return null;
+    const container = containers[0];
+    if (container.package !== pkg || container['resource-id'] !== pkg + ':id/container_save') return null;
+    if (fields[0].package !== pkg || fields[0]['resource-id'] !== 'android:id/title' || !fields[0].ancestors.includes(container['resource-id'])) return null;
+    if (saves[0].package !== pkg || saves[0]['resource-id'] !== 'android:id/button1' || !saves[0].ancestors.includes(container['resource-id'])) return null;
+  } else {
+    const downloads = owned.some(node => /^(?:Downloads?|다운로드)$/.test(node.text || '') && [...node.ancestors, node['resource-id'] || ''].some(id => /:id\/(?:toolbar|toolbar_title|directory_header|current_directory_name)$/.test(id)));
+    if (!downloads) return null;
+  }
   centerFromBounds(fields[0].bounds); centerFromBounds(saves[0].bounds);
   return { field: fields[0], save: saves[0] };
 }

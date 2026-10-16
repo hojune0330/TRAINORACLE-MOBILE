@@ -208,3 +208,47 @@ test('no successful native XML produces unknown evidence, not proof the picker n
   assert.equal(result.evidence.clickTimedOut, true);
   assert.deepEqual(safeHandoffError(Object.assign(Error('PRIVATE_SENTINEL'), { code: 'ENOENT' })), { errorType: 'file-missing', timedOut: false, exitNonzero: false });
 });
+
+// Faithful API 36 hierarchy/IDs from the observed native DocumentsUI picker;
+// bounds are fixture data only, production always reads each new XML snapshot.
+function api36Picker({ crumbs = ['Downloads'], headers = ['Files in Downloads'], roots = 1, rootPackage = pkg, crumbPackage = pkg, headerPackage = pkg, fieldPackage = pkg, savePackage = pkg, fields = 1, saves = 1, legacyDecoy = false, listDecoy = false } = {}) {
+  const breadcrumb = Array.from({ length: roots }, () => node({ 'resource-id': rootPackage + ':id/horizontal_breadcrumb', package: rootPackage, class: 'androidx.recyclerview.widget.RecyclerView', bounds: '[0,189][1080,315]' }, node({ class: 'android.widget.LinearLayout', package: rootPackage }, crumbs.map(text => node({ text, package: crumbPackage, 'resource-id': pkg + ':id/breadcrumb_text', class: 'android.widget.TextView', bounds: '[0,189][288,315]' })).join('')))).join('');
+  const header = node({ 'resource-id': pkg + ':id/header_container' }, headers.map(text => node({ text, package: headerPackage, 'resource-id': pkg + ':id/header_title', class: 'android.widget.TextView', bounds: '[63,315][890,473]' })).join(''));
+  const save = node({ 'resource-id': pkg + ':id/container_save' }, Array.from({ length: fields }, () => node({ text: 'trainoracle-journal-2026-10-16.json', package: fieldPackage, 'resource-id': 'android:id/title', class: 'android.widget.EditText', clickable: 'true', bounds: '[189,1735][801,1853]' })).join('') + Array.from({ length: saves }, () => node({ text: 'SAVE', package: savePackage, 'resource-id': 'android:id/button1', class: 'android.widget.Button', clickable: 'true', bounds: '[812,1731][1043,1857]' })).join(''));
+  const decoys = (legacyDecoy ? node({ 'resource-id': pkg + ':id/toolbar' }, node({ text: 'Downloads' })) : '') + (listDecoy ? node({ 'resource-id': pkg + ':id/dir_list' }, node({ text: 'Downloads' })) : '');
+  return '<?xml version="1.0"?><hierarchy rotation="0">' + node({ class: 'android.widget.FrameLayout' }, breadcrumb + header + save + decoys) + '</hierarchy>';
+}
+test('API 36 actual breadcrumb/header/save-container pattern authorizes only the observed local controls', () => {
+  const controls = localSaveControls(api36Picker());
+  assert.equal(controls.field.text, 'trainoracle-journal-2026-10-16.json');
+  assert.equal(controls.field['resource-id'], 'android:id/title');
+  assert.equal(controls.save['resource-id'], 'android:id/button1');
+  assert.deepEqual(centerFromBounds(controls.field.bounds), [495, 1794]);
+  assert.deepEqual(centerFromBounds(controls.save.bounds), [927, 1794]);
+});
+test('API 36 rejects empty, multiple or cloud breadcrumbs and never falls back to legacy titles', () => {
+  for (const crumbs of [[], ['Google Drive'], ['Downloads', 'Private'], ['Google Drive', 'Downloads'], ['Downloads', 'Downloads']]) {
+    assert.equal(localSaveControls(api36Picker({ crumbs, legacyDecoy: true, listDecoy: true })), null);
+  }
+});
+test('API 36 requires one matching Files in Downloads header and one breadcrumb root', () => {
+  for (const options of [{ headers: [] }, { headers: ['Files in Google Drive'] }, { headers: ['Files in Downloads', 'Files in Downloads'] }, { roots: 2 }, { roots: 0 }]) {
+    assert.equal(localSaveControls(api36Picker({ ...options, legacyDecoy: true, listDecoy: true })), null);
+  }
+});
+test('API 36 rejects mixed/wrong packages, duplicate fields/save buttons, and decoy Downloads lists', () => {
+  for (const options of [{ rootPackage: 'com.evil.documents' }, { crumbPackage: 'com.evil.documents' }, { headerPackage: 'com.evil.documents' }, { fieldPackage: 'com.evil.documents' }, { savePackage: 'com.evil.documents' }, { fields: 2 }, { saves: 2 }, { crumbs: ['Drive'], listDecoy: true }]) {
+    assert.equal(localSaveControls(api36Picker(options)), null);
+  }
+  assert.ok(localSaveControls(picker())); // Legacy path remains valid without modern markers.
+});
+test('API 36 modern markers outside the correct root cannot be rescued by a legacy Downloads title', () => {
+  const orphan = '<hierarchy>' + node({ 'resource-id': pkg + ':id/breadcrumb_text', text: 'Downloads' }) + picker().replace(/^.*?<hierarchy>|<\/hierarchy>$/g, '') + '</hierarchy>';
+  assert.equal(localSaveControls(orphan), null);
+});
+test('verified JSON bytes remain the success gate and after-save diagnostic failure is caught', async () => {
+  assert.equal(jsonExportMetadata(jsonFixture()).emptyEntries, true);
+  const text = await readFile(join(ROOT, 'scripts/android-native-ui-smoke.mjs'), 'utf8');
+  assert.match(text, /if \(exportJson\) report\.export\.validation = jsonExportMetadata\(bytes\)/);
+  assert.match(text, /try \{ await dumpPicker\('after-save'\); \}\s*catch \(error\) \{ handoffEvent\(\{ stage: 'after-save-evidence'/);
+});
