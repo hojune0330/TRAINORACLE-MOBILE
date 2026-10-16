@@ -65,7 +65,7 @@ test('CLI permits only explicit platform, no source/output/delete flags', () => 
 test('configuration rejects transport, navigation, SDK, identity and source drift', () => {
   assert.equal(validateConfiguration(release, cap), true);
   for (const delta of [{ server: { url: 'https://example.com' } }, { server: { cleartext: true } }, { android: { allowMixedContent: true } }, { server: { allowNavigation: ['*.example.com'] } }, { android: { path: '../source' } }, { appId: 'different.id.app' }, { plugins: { App: { disableBackButtonHandler: true } } }]) assert.throws(() => validateConfiguration(release, { ...cap, ...delta }));
-  for (const delta of [{ sourceSha: 'bad' }, { versionName: '1.0.0-beta' }, { versionCode: -1 }, { appId: 'io.bad-id.app' }, { androidTargetSdk: 35 }, { iosMinimumVersion: '15.0' }, { debugAppId: release.appId }, { debugAppName: 'TrainOracle' }]) assert.throws(() => validateConfiguration({ ...release, ...delta }, cap));
+  for (const delta of [{ sourceSha: 'bad' }, { versionName: '1.0.0-beta' }, { versionCode: -1 }, { versionCode: 1 }, { appId: 'io.bad-id.app' }, { androidTargetSdk: 35 }, { iosMinimumVersion: '15.0' }, { debugAppId: release.appId }, { debugAppName: 'TrainOracle' }]) assert.throws(() => validateConfiguration({ ...release, ...delta }, cap));
 });
 test('Android registration precedes super and preserves official default Back', () => {
   const result = transformMainActivity(text(android, 'app/src/main/java/com/getcapacitor/myapp/MainActivity.java').replace('com.getcapacitor.myapp', release.appId), release.appId);
@@ -242,8 +242,8 @@ test('CI AppDelegate injection preserves every original return and scene behavio
 
 test('CI lifecycle tracer is wholly dual-macro guarded, records no signal values or user data, and uses the real view tree', async () => {
   const trace = await readFile(join(WRAPPER_ROOT, 'native-probe/NativeAppLifecycleTrace.swift'), 'utf8');
-  assert.match(trace, /^#if DEBUG && TRAINORACLE_NATIVE_CI_PROBE\n[\s\S]*\n#endif\s*$/);
-  assert.equal(trace.replace(/^#if DEBUG && TRAINORACLE_NATIVE_CI_PROBE\n[\s\S]*\n#endif\s*$/, ''), '');
+  assert.match(trace, /^#if DEBUG && TRAINORACLE_NATIVE_CI_PROBE\r?\n[\s\S]*\r?\n#endif\s*$/);
+  assert.equal(trace.replace(/^#if DEBUG && TRAINORACLE_NATIVE_CI_PROBE\r?\n[\s\S]*\r?\n#endif\s*$/, ''), '');
   assert.match(trace, /UIApplication.didBecomeActiveNotification/);
   assert.match(trace, /DispatchQueue.main.async \{ snapshot\(discoverWindow: true\) \}/);
   assert.match(trace, /snapshot\(discoverWindow: false\)/);

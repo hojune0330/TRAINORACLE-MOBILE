@@ -29,10 +29,20 @@ jobs:
         with:
           path: publisher
           persist-credentials: false
+      - name: Resolve the one pinned release source
+        id: source
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const release = JSON.parse(fs.readFileSync('release-config.json', 'utf8'));
+          if (release.sourceRepository !== 'hojune0330/TRAINORACLE' || !/^[a-f0-9]{40}$/.test(release.sourceSha)
+            || release.accountMode !== 'off' || release.signingConfigured !== false || release.storeUploadEnabled !== false) throw Error('Candidate-only pinned source required');
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, 'sha=' + release.sourceSha + '\n');
+          NODE
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: hojune0330/TRAINORACLE
-          ref: 0b3c12f67617ff610005dbb558388c4b5899bb83
+          ref: ${{ steps.source.outputs.sha }}
           path: upstream
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0

@@ -26,7 +26,7 @@ async function safeAncestors(file) {
 export function validateConfiguration(release, cap) {
   if (release.appId !== 'io.trainoracle.app' || !/^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*){2,}$/.test(release.appId)) throw new Error('Invalid pinned application ID');
   if (release.debugAppId !== release.appId + '.debug' || release.debugAppName !== 'TrainOracle Test') throw new Error('Debug application isolation required');
-  if (release.versionName !== '1.0.0' || !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(release.versionName) || release.versionCode !== 1) throw new Error('Invalid pinned version');
+  if (release.versionName !== '1.0.0' || !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(release.versionName) || release.versionCode !== 2) throw new Error('Invalid pinned version');
   if (release.sourceSha !== SOURCE_SHA || release.iosMinimumVersion !== '16.0' || release.androidMinSdk !== 26 || release.androidCompileSdk !== 36 || release.androidTargetSdk !== 36) throw new Error('Pinned release SDK/source mismatch');
   if (cap.appId !== release.appId || cap.appName !== release.appName || cap.webDir !== 'www') throw new Error('Capacitor identity/webDir mismatch');
   // Deny executable/path overrides, even if they appear innocuous today.

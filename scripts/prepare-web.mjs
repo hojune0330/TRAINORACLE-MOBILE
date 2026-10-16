@@ -4,7 +4,10 @@ import { resolve, join, dirname, relative, isAbsolute, parse } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
-export const SOURCE_SHA = '0b3c12f67617ff610005dbb558388c4b5899bb83';
+// One immutable release pin shared by checkout, build, receipt and verification.
+const releaseConfig = JSON.parse(await readFile(new URL('../release-config.json', import.meta.url), 'utf8'));
+if (releaseConfig.sourceRepository !== 'hojune0330/TRAINORACLE' || !/^[a-f0-9]{40}$/.test(releaseConfig.sourceSha)) throw new Error('Invalid pinned source configuration');
+export const SOURCE_SHA = releaseConfig.sourceSha;
 export const SOURCE_REPOSITORY = 'hojune0330/TRAINORACLE';
 export const WRAPPER_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 export const RECEIPT_FILE = 'trainoracle-mobile-receipt.json';

@@ -2,15 +2,20 @@
 
 원본 `hojune0330/TRAINORACLE`을 수정하지 않고 고정 소스를 앱 안에 번들링하는 독립 Capacitor 패키징 저장소입니다. 원격 웹사이트만 여는 앱이 아닙니다.
 
-- 원본 고정 커밋: `0b3c12f67617ff610005dbb558388c4b5899bb83`
+- 원본 고정 커밋: `14df77217e12caa1d5c8290175d78e1274e14a4f` (`release-config.json`이 빌드 기준)
 - 출시 식별자: `io.trainoracle.app`, `TrainOracle`
 - 테스트 식별자: `io.trainoracle.app.debug`, `TrainOracle Test`
-- 후보 버전: 1.0.0 (1)
+- 후보 버전: 1.0.0 (2)
 - Android: min 26, compile/target 36. iOS: 최소 16.0, 빌드 Xcode/iOS SDK 26 이상.
 - 계정·OAuth·동기화·공유·백엔드·원격 게임·Garmin 자동 연동 OFF. 센서/HealthKit/Health Connect 권한 없음.
 - 원격 `server.url`·라이브 업데이트·서명·스토어 업로드 없음.
 
 ## 결과물의 범위
+
+2026-10-17: 웹과 같은 원본으로 후보를 갱신한다. 체크아웃과 빌드 검증은
+`release-config.json`의 단일 SHA를 사용한다. 설정 변경·GitHub 반영과 실제 네이티브
+빌드 성공은 별개다. 기존 `*-artifact-*` 워크플로는 고정된 과거 산출물 검증용이며
+새 후보가 검증됐다는 증거로 사용하지 않는다. 브랜드 자산의 이전 원본 출처도 보존한다.
 
 `Mobile candidate` 워크플로는 수동으로만 실행됩니다. 공개 저장소의 표준 Ubuntu/macOS 러너를 사용합니다.
 
