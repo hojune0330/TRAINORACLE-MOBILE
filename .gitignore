@@ -1,0 +1,13 @@
+node_modules/
+www/
+android/
+ios/
+output/
+.DS_Store
+*.jks
+*.keystore
+*.p12
+*.p8
+*.mobileprovision
+.env
+.env.*

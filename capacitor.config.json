@@ -1,0 +1,19 @@
+{
+  "appId": "io.trainoracle.app",
+  "appName": "TrainOracle",
+  "webDir": "www",
+  "backgroundColor": "#E4E2DA",
+  "loggingBehavior": "none",
+  "server": {
+    "hostname": "localhost",
+    "androidScheme": "https",
+    "iosScheme": "capacitor",
+    "cleartext": false
+  },
+  "android": {
+    "allowMixedContent": false
+  },
+  "ios": {
+    "allowsLinkPreview": false
+  }
+}

@@ -1,0 +1,12 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
+import {join} from 'node:path';
+import pngjs from 'pngjs';
+import {ROOT,markSvg,renderRgb,BACKGROUND,FOREGROUND} from './generate-assets.mjs';
+const {PNG}=pngjs;
+test('iOS marketing icon is actual 1024px opaque RGB, not alpha',async()=>{const b=await readFile(join(ROOT,'resources/ios/AppIcon.appiconset/icon-1024.png'));assert.equal(b.readUInt32BE(16),1024);assert.equal(b.readUInt32BE(20),1024);assert.equal(b[25],2);});
+test('Play icon meets 512px and size requirement',async()=>{const b=await readFile(join(ROOT,'resources/store/icon-512.png'));assert.equal(b.readUInt32BE(16),512);assert.equal(b.readUInt32BE(20),512);assert(b.length<=1024*1024);assert.equal(b[25],2);});
+test('existing brand reference retains exact foreground/background colors',async()=>{const p=PNG.sync.read(await readFile(join(ROOT,'resources/brand/reference-icon-512.png')));const hex=(x,y)=>'#'+Array.from(p.data.subarray((y*p.width+x)*4,(y*p.width+x)*4+3)).map(x=>x.toString(16).padStart(2,'0')).join('').toUpperCase();assert.equal(hex(0,0),BACKGROUND);assert.equal(hex(256,256),FOREGROUND);});
+test('vector mark stays perceptually equivalent to source geometry',async()=>{const original=PNG.sync.read(await readFile(join(ROOT,'resources/brand/reference-icon-512.png')));const generated=PNG.sync.read(renderRgb(markSvg()));let total=0;for(let i=0;i<original.data.length;i+=4)for(let k=0;k<3;k++)total+=Math.abs(original.data[i+k]-generated.data[i+k]);assert(total/(512*512*3)<2,'reference geometry drift');});
+test('adaptive foreground fits safe circle and has no new branding',async()=>{assert(215*0.72<512*0.3056);const x=await readFile(join(ROOT,'resources/android/res/drawable-v24/ic_launcher_foreground.xml'),'utf8');assert(x.includes('android:scaleX="0.72"'));assert(!x.includes('Capacitor'));});

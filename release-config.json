@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "appId": "io.trainoracle.app",
+  "appName": "TrainOracle",
+  "versionName": "1.0.0",
+  "versionCode": 1,
+  "sourceRepository": "hojune0330/TRAINORACLE",
+  "sourceSha": "0b3c12f67617ff610005dbb558388c4b5899bb83",
+  "website": "https://trainoracle.io/",
+  "contactEmail": "hojune.jang@trainoracle.io",
+  "iosMinimumVersion": "16.0",
+  "androidMinSdk": 26,
+  "androidCompileSdk": 36,
+  "androidTargetSdk": 36,
+  "accountMode": "off",
+  "requestedDeveloperDisplayName": "Infinite Opportunity",
+  "storeRegistrationStatus": "pending-company-name-route-verification",
+  "signingConfigured": false,
+  "storeUploadEnabled": false,
+  "debugAppId": "io.trainoracle.app.debug",
+  "debugAppName": "TrainOracle Test"
+}

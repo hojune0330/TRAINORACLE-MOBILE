@@ -1,0 +1,28 @@
+{
+  "name": "trainoracle-mobile-publisher",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.19.0"
+  },
+  "scripts": {
+    "test": "node --test scripts/*.test.mjs",
+    "generate:native": "node scripts/generate-native.mjs",
+    "prepare:release": "node scripts/prepare-release.mjs"
+  },
+  "dependencies": {
+    "@capacitor/core": "8.5.3",
+    "@capacitor/android": "8.5.3",
+    "@capacitor/ios": "8.5.3",
+    "@capacitor/app": "8.1.2"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "8.5.3",
+    "esbuild": "0.28.2",
+    "@resvg/resvg-js": "2.6.2",
+    "pngjs": "7.0.0",
+    "xcode": "3.0.1",
+    "playwright-core": "1.64.1"
+  }
+}

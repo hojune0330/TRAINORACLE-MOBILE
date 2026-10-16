@@ -1,0 +1,35 @@
+import { readFile, writeFile, mkdir, copyFile } from 'node:fs/promises';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { build } from 'esbuild';
+import { prepareWeb, prepareOutput, verifyOutput, SOURCE_SHA } from './prepare-web.mjs';
+const root=dirname(dirname(fileURLToPath(import.meta.url)));
+const arg=process.argv.indexOf('--source');
+if(arg<0 || !process.argv[arg+1]) throw Error('--source <full immutable checkout> required');
+const config=JSON.parse(await readFile(join(root,'release-config.json'),'utf8'));
+if(config.sourceSha!==SOURCE_SHA || config.storeUploadEnabled!==false || config.signingConfigured!==false) throw Error('Candidate-only release configuration required');
+const www=join(root,'www');
+await mkdir(www,{recursive:true});
+const receipt=await prepareWeb({sourceRoot:resolve(process.argv[arg+1]),outputDir:www,sourceSha:SOURCE_SHA});
+await mkdir(join(www,'native'),{recursive:true});
+await build({entryPoints:[join(root,'web-adapter/bootstrap.js')],outfile:join(www,'native/bootstrap.js'),bundle:true,format:'iife',platform:'browser',target:['safari16','chrome120'],minify:true,sourcemap:false,legalComments:'eof'});
+let html=await readFile(join(www,'index.html'),'utf8');
+const entry=/<script\b[^>]*\btype\s*=\s*["']module["'][^>]*>/i;
+if(!entry.test(html)||html.includes('native/bootstrap.js'))throw Error('Expected exactly one untouched app entry and no previous bootstrap');
+html=html.replace(entry,tag=>'<script src="native/bootstrap.js"></script>\n'+tag);
+await writeFile(join(www,'index.html'),html);
+const escape=s=>s.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');
+const nativeNotices=[];
+for(const pkg of ['core','android','ios','app']){
+ const license=await readFile(join(root,'node_modules/@capacitor',pkg,'LICENSE'),'utf8');
+ nativeNotices.push(`<h3>@capacitor/${pkg}</h3><pre>${escape(license)}</pre>`);
+}
+const noticePath=join(www,'legal/third-party-notices.html');
+let notices=await readFile(noticePath,'utf8');
+if(!/<\/body\s*>/i.test(notices))throw Error('Existing notices document must be preserved');
+notices=notices.replace(/<\/body\s*>/i,`<section id="mobile-native-notices"><h2>모바일 앱 런타임 고지</h2>${nativeNotices.join('\n')}</section></body>`);
+await writeFile(noticePath,notices);
+await copyFile(join(root,'native-templates/THIRD_PARTY_NOTICES.md'),join(www,'legal/mobile-native-notices.md'));
+const finalReceipt=await prepareOutput(www,{sourceSha:SOURCE_SHA,sourceBefore:receipt.sourceTree.before,sourceAfter:receipt.sourceTree.after});
+await verifyOutput(www,SOURCE_SHA);
+console.log(JSON.stringify({sourceSha:finalReceipt.sourceSha,scope:finalReceipt.verificationScope,sourceUnchanged:finalReceipt.sourceUnchanged,accountMode:finalReceipt.accountMode,files:Object.keys(finalReceipt.files).length,storeUploadEnabled:false}));
