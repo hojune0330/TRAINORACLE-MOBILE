@@ -81,7 +81,7 @@ xcrun simctl boot "$DEVICE"
 xcrun simctl bootstatus "$DEVICE" -b > "$OUT/ios-json-boot.log" 2>&1
 xcrun simctl install "$DEVICE" "$APP"
 # No app target, binary, signing operation, capability shim or JS injection for R5.
-xcodebuild -project native-ui-tests/ios/NativeJSONSaveHarness.xcodeproj -scheme NativeJSONSaveHarness -configuration Debug -sdk iphonesimulator -destination "platform=iOS Simulator,id=$DEVICE" -derivedDataPath "$DERIVED" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build-for-testing > "$OUT/ios-json-harness-build.log" 2>&1
+xcodebuild -project native-ui-tests/ios/NativeJSONSaveHarness.xcodeproj -scheme NativeJSONSaveHarness -configuration Debug -sdk iphonesimulator -destination "platform=iOS Simulator,id=$DEVICE" -derivedDataPath "$DERIVED" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO ONLY_ACTIVE_ARCH=YES build-for-testing > "$OUT/ios-json-harness-build.log" 2>&1
 shopt -s nullglob
 RUNS=("$DERIVED/Build/Products/"*.xctestrun)
 [ "${#RUNS[@]}" -eq 1 ]

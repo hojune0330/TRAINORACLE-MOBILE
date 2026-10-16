@@ -120,9 +120,34 @@ final class NativeJSONSaveUITests: XCTestCase {
             if matches.count > 1 { try fail("Ambiguous backup navigation control") }
             if let button = matches.first, button.isHittable { return button }
             guard attempt < 4 else { try fail("Backup navigation not reachable within four swipes") }
-            let webViews = app.webViews.allElementsBoundByIndex.filter { $0.exists && $0.isHittable }
-            guard webViews.count == 1 else { try fail("No unique real WebView for More navigation") }
-            webViews[0].swipeUp()
+            // R11 AX has three nested WebView wrappers for one document.
+            // Its unique DOM main is the More content viewport; the bottom
+            // "주 탭, navigation" is a sibling, outside this scroll surface.
+            // Requery the surface AND its page proof on every bounded swipe.
+            let mains = app.otherElements.matching(NSPredicate(format: "label == %@", "main"))
+                .allElementsBoundByIndex.filter { $0.exists }
+            guard mains.count == 1 else { try fail("Ambiguous or absent DOM main scroll surface") }
+            let main = mains[0]
+            let back = main.buttons.matching(NSPredicate(format: "label == %@", "홈으로 돌아가기"))
+                .allElementsBoundByIndex.filter { $0.exists }
+            let title = main.staticTexts.matching(NSPredicate(format: "label == %@", "더보기"))
+                .allElementsBoundByIndex.filter { $0.exists }
+            let backup = main.buttons.matching(NSPredicate(format: "label == %@", "백업·복원·휴지통"))
+                .allElementsBoundByIndex.filter { $0.exists }
+            let tabLabels = ["주 탭", "주 탭, navigation"]
+            let tabs = app.otherElements.matching(NSPredicate(format: "label IN %@", tabLabels))
+                .allElementsBoundByIndex.filter { $0.exists }
+            guard back.count == 1, title.count == 1, backup.count == 1,
+                  tabs.count == 1, main.isHittable,
+                  main.frame.width > 0, main.frame.height > 0,
+                  app.frame.contains(main.frame),
+                  main.frame.maxY <= tabs[0].frame.minY + 1,
+                  main.descendants(matching: .any).matching(NSPredicate(format: "label IN %@", tabLabels)).count == 0 else {
+                try fail("More DOM main subtree or bottom-tab boundary not proven")
+            }
+            // Element-relative native swipe only; frames above are validation,
+            // never event coordinates. Sibling/ambiguous main views fail closed.
+            main.swipeUp()
             RunLoop.current.run(until: Date().addingTimeInterval(0.4))
             evidence("more-backup-scroll-\(attempt + 1)")
         }
