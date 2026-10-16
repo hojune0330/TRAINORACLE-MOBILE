@@ -5,7 +5,15 @@ import WebKit
 // CI-only probe. No user fields, keys, journal values or credentials are captured.
 enum NativeReleaseProbe {
     static func attach(to webView: WKWebView?) {
-        guard let phase=ProcessInfo.processInfo.environment["TRAINORACLE_NATIVE_PROBE"], ["1","write","read"].contains(phase), let webView else { return }
+        let valid=["1","write","read"]
+        let environmentPhase=ProcessInfo.processInfo.environment["TRAINORACLE_NATIVE_PROBE"]
+        let arguments=ProcessInfo.processInfo.arguments
+        let flagIndex=arguments.firstIndex(of: "--trainoracle-native-probe")
+        let argumentPhase=flagIndex.flatMap { index in arguments.indices.contains(index+1) ? arguments[index+1] : nil }
+        let phase=environmentPhase.flatMap { valid.contains($0) ? $0 : nil } ?? argumentPhase.flatMap { valid.contains($0) ? $0 : nil }
+        guard let phase else { return }
+        NSLog("TrainOracleNativeProbe: activated webViewPresent=%d", webView == nil ? 0 : 1)
+        guard let webView else { return }
         waitForBootstrap(webView, phase: phase, remaining: 80)
     }
     private static func waitForBootstrap(_ webView: WKWebView, phase: String, remaining: Int) {
@@ -67,10 +75,19 @@ enum NativeReleaseProbe {
         }
     }
     private static func write(_ value: [String: Any]) {
-        guard let folder=FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first,
+        guard let cache=FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first,
               let bytes=try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]) else { return }
-        // This is a dedicated fresh simulator sandbox, never an existing browser origin.
-        try? bytes.write(to: folder.appendingPathComponent("native-release-probe.json"), options: [.atomic, .completeFileProtection])
+        // Only public boolean diagnostics in our own CI cache folder, never user records.
+        let folder=cache.appendingPathComponent("TrainOracleNativeCI", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            try bytes.write(to: folder.appendingPathComponent("native-release-probe.json"), options: [.atomic])
+            NSLog("TrainOracleNativeProbe: diagnosticWritten=1")
+        } catch {
+            let failure=error as NSError
+            let domain=[NSCocoaErrorDomain,NSPOSIXErrorDomain].contains(failure.domain) ? failure.domain : "other"
+            NSLog("TrainOracleNativeProbe: diagnosticWritten=0 domain=%@ code=%ld", domain, failure.code)
+        }
     }
 }
 #endif

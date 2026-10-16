@@ -110,6 +110,16 @@ test('actual xcode 3.0.1 parser registers App Sources and privacy Resources, str
   const out = project.writeSync();
   for (const name of ['NativeBridgeViewController.swift', 'NativeDocumentsPlugin.swift', 'NativeReleaseProbe.swift']) assert.ok(out.includes(name + ' in Sources'));
   assert.ok(out.includes('PrivacyInfo.xcprivacy in Resources'));
+  const objects = project.hash.project.objects;
+  const targetEntry = Object.entries(objects.PBXNativeTarget).find(([id, t]) => !id.endsWith('_comment') && String(t.name).replaceAll('"', '') === 'App');
+  const appTarget = targetEntry[1];
+  const sourcePhaseId = appTarget.buildPhases.map(p => p.value).find(id => objects.PBXSourcesBuildPhase[id]);
+  assert.ok(sourcePhaseId, 'App target must own a Sources build phase');
+  const compiledNames = objects.PBXSourcesBuildPhase[sourcePhaseId].files.map(ref => {
+    const build = objects.PBXBuildFile[ref.value];
+    return String(objects.PBXFileReference[build.fileRef].path).replaceAll('"', '');
+  });
+  for (const name of ['NativeBridgeViewController.swift', 'NativeDocumentsPlugin.swift', 'NativeReleaseProbe.swift']) assert.ok(compiledNames.includes(name), name + ' must be in the actual App Sources phase');
   assert.doesNotMatch(out, /DEVELOPMENT_TEAM|PROVISION|CODE_SIGN|ProvisioningStyle/);
   assert.doesNotMatch(out, /IPHONEOS_DEPLOYMENT_TARGET = 15/);
   assert.match(out, /TARGETED_DEVICE_FAMILY = 1/);
@@ -120,6 +130,9 @@ test('actual xcode 3.0.1 parser registers App Sources and privacy Resources, str
     const isDebug = String(config.name).replaceAll('"', '') === 'Debug';
     assert.equal(config.buildSettings.PRODUCT_BUNDLE_IDENTIFIER, isDebug ? 'io.trainoracle.app.debug' : 'io.trainoracle.app');
     assert.equal(config.buildSettings.APP_DISPLAY_NAME, isDebug ? '"TrainOracle Test"' : '"TrainOracle"');
+    const conditions = String(config.buildSettings.SWIFT_ACTIVE_COMPILATION_CONDITIONS || '').replaceAll('"', '').split(/\s+/);
+    assert.equal(conditions.includes('DEBUG'), isDebug, 'App Swift DEBUG must be enabled only in Debug');
+    if (!isDebug) assert.doesNotMatch(String(config.buildSettings.OTHER_SWIFT_FLAGS || ''), /(?:^|\s|"|\\)-D\s*DEBUG(?:$|\s|"|\\)/);
   }
   await writeFile(file, out); const roundtrip = require('xcode').project(file); roundtrip.parseSync();
 });
@@ -169,4 +182,16 @@ test('generator limits deletion to stock generated splash files, never source or
   assert.doesNotMatch(implementation, /(?:git clone|git checkout|npm install|npm ci|xcodebuild|gradlew assemble)/);
   assert.match(implementation, /await checkedRun\(\['add'/);
   assert.match(implementation, /await checkedRun\(\['sync'/);
+});
+
+test('installed Capacitor lifecycle provides the real bridge WebView before capacitorDidLoad', async () => {
+  const controller = await readFile(join(WRAPPER_ROOT, 'node_modules/@capacitor/ios/Capacitor/Capacitor/CAPBridgeViewController.swift'), 'utf8');
+  const bridge = await readFile(join(WRAPPER_ROOT, 'node_modules/@capacitor/ios/Capacitor/Capacitor/CapacitorBridge.swift'), 'utf8');
+  const loadView = controller.match(/override public final func loadView\(\)\s*\{[\s\S]*?\n    \}/)?.[0];
+  assert.ok(loadView);
+  assert.ok(loadView.indexOf('prepareWebView(') < loadView.indexOf('capacitorBridge = CapacitorBridge('));
+  assert.ok(loadView.indexOf('capacitorBridge = CapacitorBridge(') < loadView.indexOf('capacitorDidLoad()'));
+  assert.match(controller, /public var bridgedWebView: WKWebView\?\s*\{\s*return webView/);
+  assert.match(bridge, /public var webView: WKWebView\?\s*\{\s*return bridgeDelegate\?\.bridgedWebView/);
+  assert.match(controller, /webView = aWebView/);
 });

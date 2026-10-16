@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { ROOT, CDP_ENDPOINT, parseArgs, extractDiagnostic, isNativePage, decodeResult, assertPassed, connectNativePage, assertHostedRuntime } from './android-runtime-probe.mjs';
+import { ROOT, parseAndroidTarget, selectWebView, connectionErrorCode, parseArgs, extractDiagnostic, isNativePage, decodeResult, assertPassed, connectNativePage, assertHostedRuntime } from './android-runtime-probe.mjs';
 
 // Pure parser/gate tests only. No app source imports, remote requests, emulator,
 // native compiler, Playwright browser launch or diagnostic JS execution.
@@ -61,13 +61,51 @@ test('malformed, non-boolean, unknown and wrong-stage data fail closed', () => {
   assert.throws(() => decodeResult(fixture(), 'other'));
   assert.throws(() => assertPassed(decodeResult(fixture(), 'write'), 'read'), /stage/);
 });
-test('CDP attachment selects an existing native page without creating pages or browsers', async () => {
-  let calls = 0;
-  const native = { url: () => 'https://localhost/' };
-  const browser = { contexts: () => [{ pages: () => [{ url: () => 'about:blank' }, native] }] };
-  const chromium = { connectOverCDP: async (endpoint, options) => { calls++; assert.equal(endpoint, CDP_ENDPOINT); assert.ok(options.timeout > 0); return browser; } };
-  assert.deepEqual(await connectNativePage(chromium), { browser, page: native });
-  assert.equal(calls, 1);
+const target = { serial: 'emulator-5580', pid: 1234, socket: 'webview_devtools_remote_1234', pkg: 'io.trainoracle.app.debug' };
+function fakeAndroid({ urls = ['https://localhost/'], views, serial = target.serial, pageError } = {}) {
+  let urlIndex = 0, closed = 0, discoveries = 0;
+  const page = { url: () => urls[Math.min(urlIndex++, urls.length - 1)] };
+  const view = { pkg: () => target.pkg, pid: () => target.pid, page: async () => { if (pageError) throw pageError; return page; } };
+  const device = { serial: () => serial, webViews: () => { discoveries++; return views ? views(view, discoveries) : [view]; }, close: async () => { closed++; } };
+  const android = { devices: async options => { assert.deepEqual(options, { host: '127.0.0.1', port: 5037, omitDriverInstall: true }); return [device]; } };
+  return { android, page, closed: () => closed };
+}
+test('official Android attachment works without any HTTP browser websocket metadata', async () => {
+  const fake = fakeAndroid();
+  const result = await connectNativePage(fake.android, { target });
+  assert.equal(result.page, fake.page);
+  await result.browser.close(); assert.equal(fake.closed(), 1);
+});
+test('target identity rejects personal devices, stale PID/socket and missing identity', () => {
+  const env = { TRAINORACLE_ANDROID_SERIAL: target.serial, TRAINORACLE_ANDROID_PID: '1234', TRAINORACLE_ANDROID_SOCKET: target.socket };
+  assert.deepEqual(parseAndroidTarget(env), target);
+  for (const bad of [{}, { ...env, TRAINORACLE_ANDROID_SERIAL: 'user-phone' }, { ...env, TRAINORACLE_ANDROID_PID: '1235' }, { ...env, TRAINORACLE_ANDROID_SOCKET: 'chrome_devtools_remote' }]) assert.throws(() => parseAndroidTarget(bad));
+});
+test('WebView selection requires matching package and fresh process; ambiguity fails', () => {
+  const good = { pkg: () => target.pkg, pid: () => target.pid };
+  assert.equal(selectWebView([{ pkg: () => 'com.android.chrome', pid: () => 1234 }, { pkg: () => target.pkg, pid: () => 999 }, good], target), good);
+  assert.equal(selectWebView([], target), undefined);
+  assert.throws(() => selectWebView([good, good], target), /Ambiguous/);
+});
+test('discovery tolerates delayed WebView and initial about:blank, without creating pages', async () => {
+  const fake = fakeAndroid({ urls: ['about:blank', 'https://localhost/'], views: (view, count) => count === 1 ? [] : [view] });
+  const result = await connectNativePage(fake.android, { target, timeoutMs: 1000, intervalMs: 1 });
+  await result.browser.close(); assert.equal(fake.closed(), 1);
+});
+test('unexpected origins, closed targets, wrong devices and absent targets fail with safe diagnostics', async () => {
+  for (const options of [{ urls: ['https://evil.test/private?token=SECRET'] }, { pageError: Error('Target closed SECRET') }, { serial: 'emulator-5582' }, { views: () => [] }]) {
+    const fake = fakeAndroid(options), events = [];
+    await assert.rejects(connectNativePage(fake.android, { target, timeoutMs: 20, intervalMs: 1, diagnostic: event => events.push(event) }), /Android WebView connection failed at/);
+    assert.equal(fake.closed(), 1); assert.ok(events.length > 0);
+    assert.doesNotMatch(JSON.stringify(events), /SECRET|evil|private|token/);
+  }
+});
+test('hanging WebView page attachment is bounded and classified, not silently retried', async () => {
+  let closed = false;
+  const android = { devices: async () => [{ serial: () => target.serial, webViews: () => [{ pkg: () => target.pkg, pid: () => target.pid, page: () => new Promise(() => {}) }], close: async () => { closed = true; } }] };
+  await assert.rejects(connectNativePage(android, { target, timeoutMs: 10 }), /webview-page \(timeout\)/);
+  assert.equal(closed, true);
+  assert.equal(connectionErrorCode(Error('Protocol method not found SECRET')), 'protocol');
 });
 test('shared diagnostic is read as text only and confines storage access to its reserved probe', async () => {
   const swift = await readFile(resolve(ROOT, 'native-probe/NativeReleaseProbe.swift'), 'utf8');
@@ -85,7 +123,9 @@ test('shared diagnostic is read as text only and confines storage access to its 
 test('runner is attach-only and never imports or runs an original source regression suite', async () => {
   const text = await readFile(resolve(ROOT, 'scripts/android-runtime-probe.mjs'), 'utf8');
   assert.doesNotMatch(text, /chromium\.launch|launchPersistentContext|newContext\(|newPage\(|addInitScript\(|exposeBinding\(|spawn\(|execFile\(/);
-  assert.match(text, /connectOverCDP\(/);
+  assert.match(text, /android\.devices\(/);
+  assert.match(text, /omitDriverInstall: true/);
+  assert.match(text, /await bounded\(view\.page\(\)/);
   assert.match(text, /new AsyncFunction\('phase', body\)\(phase\)/);
 });
 test('shell keeps the same APK and data, isolates a CI AVD, and captures an actual screen', async () => {

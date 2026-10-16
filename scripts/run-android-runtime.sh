@@ -94,6 +94,7 @@ launch_and_forward() {
       socket="$(timeout 5 "$ADB" -s "$SERIAL" shell cat /proc/net/unix 2>/dev/null | tr -d '\r' | awk -v socket="@webview_devtools_remote_$pid" '$NF == socket {print substr($NF,2); exit}')" || socket=''
       if [[ -n "$socket" ]]; then
         timeout 10 "$ADB" -s "$SERIAL" forward --no-rebind tcp:9222 "localabstract:$socket"
+        export TRAINORACLE_ANDROID_SERIAL="$SERIAL" TRAINORACLE_ANDROID_PID="$pid" TRAINORACLE_ANDROID_SOCKET="$socket"
         return 0
       fi
     fi

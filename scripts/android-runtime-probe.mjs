@@ -4,7 +4,6 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 export const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 export const EXPECTED_ORIGIN = 'https://localhost';
-export const CDP_ENDPOINT = 'http://127.0.0.1:9222';
 const TRUE_FLAGS = ['probeReady', 'secureContext', 'locksAvailable', 'cryptoAvailable', 'indexedDBAvailable', 'localStorageAvailable', 'nativeDocumentsAvailable', 'appPluginAvailable', 'realLock', 'cryptoRoundTrip', 'localStorageRoundTrip', 'indexedDBRoundTrip', 'rootRendered', 'coreContentPresent'];
 const FALSE_FLAGS = ['storageFailureVisible'];
 const PERSISTENCE_FLAGS = ['localStoragePersistence', 'indexedDBPersistence'];
@@ -48,25 +47,79 @@ export function assertPassed(result, phase) {
   if (phase === 'read') for (const key of PERSISTENCE_FLAGS) if (result[key] !== true) throw new Error('Same-APK update persistence failed: ' + key);
   return true;
 }
-export async function connectNativePage(chromium, { timeoutMs = 45000 } = {}) {
+export function parseAndroidTarget(env = process.env) {
+  const serial = env.TRAINORACLE_ANDROID_SERIAL;
+  const pid = Number(env.TRAINORACLE_ANDROID_PID);
+  const socket = env.TRAINORACLE_ANDROID_SOCKET;
+  if (!/^emulator-[0-9]+$/.test(serial || '') || !Number.isSafeInteger(pid) || pid < 1 || socket !== 'webview_devtools_remote_' + pid) throw new Error('Expected the owned CI emulator serial, PID and matching WebView socket');
+  return { serial, pid, socket, pkg: 'io.trainoracle.app.debug' };
+}
+export function selectWebView(views, target) {
+  // Public AndroidWebView exposes package/PID; the shell independently verified
+  // that this PID owns target.socket before exporting the target identity.
+  const matches = views.filter(view => view.pkg() === target.pkg && view.pid() === target.pid);
+  if (matches.length > 1) throw new Error('Ambiguous matching Android WebViews');
+  return matches[0];
+}
+export function connectionErrorCode(error) {
+  const text = String(error?.message || '');
+  if (/timed out|timeout/i.test(text)) return 'timeout';
+  if (/ambiguous/i.test(text)) return 'ambiguous';
+  if (/closed|disconnected/i.test(text)) return 'closed';
+  if (/origin|navigated/i.test(text)) return 'origin';
+  if (/ECONNREFUSED/i.test(text)) return 'connection-refused';
+  if (/protocol|method.*found/i.test(text)) return 'protocol';
+  return 'connection-error'; // Never persist raw errors or protocol payloads.
+}
+async function bounded(operation, ms) {
+  let timer;
+  try { return await Promise.race([operation, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Operation timed out')), ms); })]); }
+  finally { clearTimeout(timer); }
+}
+export async function connectNativePage(android, { target = parseAndroidTarget(), timeoutMs = 45000, intervalMs = 500, diagnostic = () => {} } = {}) {
   const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    let browser;
-    try {
-      browser = await chromium.connectOverCDP(CDP_ENDPOINT, { timeout: Math.min(5000, Math.max(1, deadline - Date.now())) });
-      while (Date.now() < deadline) {
-        const pages = browser.contexts().flatMap(context => context.pages()).filter(p => isNativePage(p.url()));
-        if (pages.length === 1) return { browser, page: pages[0] };
-        if (pages.length > 1) throw new Error('Ambiguous native WebView');
-        await new Promise(ok => setTimeout(ok, 500));
+  let devices = [], last = 'pending', stage = 'adb-devices';
+  const emit = (extra = {}) => diagnostic({ stage, code: last, ...extra });
+  try {
+    // Official Android attachment opens localabstract /devtools/browser directly
+    // and enables Playwright's WebView-specific protocol path. It does not need
+    // a browser websocket field in /json/version or a page-only CDP endpoint.
+    devices = await bounded(android.devices({ host: '127.0.0.1', port: 5037, omitDriverInstall: true }), Math.max(1, deadline - Date.now()));
+    const matches = devices.filter(device => device.serial() === target.serial);
+    emit({ deviceCount: devices.length, matchingDeviceCount: matches.length });
+    if (matches.length !== 1) throw new Error('Ambiguous or missing owned emulator');
+    const selected = matches[0];
+    last = 'device-selected';
+    while (Date.now() < deadline) {
+      stage = 'webview-discovery';
+      const views = selected.webViews();
+      const view = selectWebView(views, target);
+      emit({ webViewCount: views.length, matchingWebView: Boolean(view) });
+      if (view) {
+        stage = 'webview-page';
+        last = 'webview-selected';
+        const page = await bounded(view.page(), Math.max(1, deadline - Date.now()));
+        stage = 'native-origin';
+        while (Date.now() < deadline) {
+          const url = page.url();
+          if (isNativePage(url)) {
+            last = 'connected'; emit({ nativeOrigin: true });
+            return { page, browser: { close: async () => { for (const device of devices) await bounded(device.close(), 2000); } } };
+          }
+          if (url && url !== 'about:blank') throw new Error('Unexpected native WebView origin');
+          await new Promise(ok => setTimeout(ok, Math.min(intervalMs, Math.max(1, deadline - Date.now()))));
+        }
+        throw new Error('Native origin timed out');
       }
-    } catch {
-      // The forwarded app process may not have exposed its WebView yet.
+      last = 'no-matching-webview';
+      await new Promise(ok => setTimeout(ok, Math.min(intervalMs, Math.max(1, deadline - Date.now()))));
     }
-    if (browser) await browser.close().catch(() => {}); // Disconnect attached CDP, never launch a browser.
-    if (Date.now() < deadline) await new Promise(ok => setTimeout(ok, 500));
+    throw new Error('WebView discovery timed out');
+  } catch (error) {
+    last = connectionErrorCode(error); emit();
+    for (const device of devices) { try { await bounded(device.close(), 2000); } catch { diagnostic({ stage: 'disconnect', code: 'disconnect-error' }); } }
+    throw new Error('Android WebView connection failed at ' + stage + ' (' + last + ')');
   }
-  throw new Error('Native localhost WebView CDP connection timed out');
 }
 export function assertHostedRuntime(env = process.env, platform = process.platform, arch = process.arch) {
   if (env.GITHUB_ACTIONS !== 'true' || env.CI !== 'true' || env.RUNNER_ENVIRONMENT !== 'github-hosted' || platform !== 'linux' || arch !== 'x64') throw new Error('Native runtime probe requires an ephemeral GitHub-hosted Linux x86_64 runner');
@@ -75,8 +128,17 @@ export async function runProbe({ phase }) {
   parseArgs(['--phase', phase]);
   assertHostedRuntime();
   const body = extractDiagnostic(await readFile(resolve(ROOT, 'native-probe/NativeReleaseProbe.swift'), 'utf8'));
-  const { chromium } = await import('playwright-core');
-  const { browser, page } = await connectNativePage(chromium);
+  const { _android } = await import('playwright-core');
+  const output = resolve(ROOT, 'output');
+  await mkdir(output, { recursive: true });
+  const diagnostics = [];
+  let connection;
+  try {
+    connection = await connectNativePage(_android, { diagnostic: event => { if (diagnostics.length < 100) diagnostics.push(event); } });
+  } finally {
+    await writeFile(resolve(output, 'android-webview-connection-' + phase + '.json'), JSON.stringify(diagnostics, null, 2) + '\n');
+  }
+  const { browser, page } = connection;
   try {
     await page.waitForFunction(() => document.readyState === 'complete' && Boolean(window.__NATIVE_CAPABILITIES__), null, { timeout: 45000 });
     if (!isNativePage(page.url())) throw new Error('Native WebView navigated away');
@@ -91,8 +153,6 @@ export async function runProbe({ phase }) {
       ]);
     }, { body, phase });
     const result = decodeResult(value, phase);
-    const output = resolve(ROOT, 'output');
-    await mkdir(output, { recursive: true });
     await writeFile(resolve(output, 'native-android-probe-' + phase + '.json'), JSON.stringify(result, null, 2) + '\n');
     try { await writeFile(resolve(output, 'android-ui-aria.txt'), await page.locator('body').ariaSnapshot({ timeout: 5000 }) + '\n'); } catch { /* optional UI evidence */ }
     assertPassed(result, phase);

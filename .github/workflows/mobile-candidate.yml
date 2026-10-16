@@ -164,16 +164,17 @@ jobs:
           xcrun simctl bootstatus "$DEVICE" -b
           xcrun simctl status_bar "$DEVICE" override --time '9:41' --dataNetwork wifi --wifiMode active --wifiBars 3 --batteryState charged --batteryLevel 100
           xcrun simctl install "$DEVICE" "$APP"
-          SIMCTL_CHILD_TRAINORACLE_NATIVE_PROBE=write xcrun simctl launch --terminate-running-process "$DEVICE" io.trainoracle.app.debug
+          SIMCTL_CHILD_TRAINORACLE_NATIVE_PROBE=write xcrun simctl launch --terminate-running-process "$DEVICE" io.trainoracle.app.debug --trainoracle-native-probe write
           DATA=$(xcrun simctl get_app_container "$DEVICE" io.trainoracle.app.debug data)
-          for i in {1..80}; do [ -f "$DATA/Documents/native-release-probe.json" ] && break; sleep 1; done
-          cp "$DATA/Documents/native-release-probe.json" output/native-ios-probe-write.json
+          for i in {1..80}; do [ -f "$DATA/Library/Caches/TrainOracleNativeCI/native-release-probe.json" ] && break; sleep 1; done
+          cp "$DATA/Library/Caches/TrainOracleNativeCI/native-release-probe.json" output/native-ios-probe-write.json
           xcrun simctl terminate "$DEVICE" io.trainoracle.app.debug
           xcrun simctl install "$DEVICE" "$APP"
-          rm "$DATA/Documents/native-release-probe.json"
-          SIMCTL_CHILD_TRAINORACLE_NATIVE_PROBE=read xcrun simctl launch --terminate-running-process "$DEVICE" io.trainoracle.app.debug
-          for i in {1..80}; do [ -f "$DATA/Documents/native-release-probe.json" ] && break; sleep 1; done
-          cp "$DATA/Documents/native-release-probe.json" output/native-ios-probe-read.json
+          DATA=$(xcrun simctl get_app_container "$DEVICE" io.trainoracle.app.debug data)
+          rm -f "$DATA/Library/Caches/TrainOracleNativeCI/native-release-probe.json"
+          SIMCTL_CHILD_TRAINORACLE_NATIVE_PROBE=read xcrun simctl launch --terminate-running-process "$DEVICE" io.trainoracle.app.debug --trainoracle-native-probe read
+          for i in {1..80}; do [ -f "$DATA/Library/Caches/TrainOracleNativeCI/native-release-probe.json" ] && break; sleep 1; done
+          cp "$DATA/Library/Caches/TrainOracleNativeCI/native-release-probe.json" output/native-ios-probe-read.json
           xcrun simctl io "$DEVICE" screenshot output/trainoracle-ios-actual.png
           node --input-type=module <<'NODE'
           import fs from 'node:fs';
@@ -185,6 +186,12 @@ jobs:
           NODE
           cp www/trainoracle-mobile-receipt.json output/web-build-receipt.json
           printf '%s\n' 'SIMULATOR ONLY: not a signed App Store IPA. Probe writes only dedicated test keys/database in a fresh simulator sandbox; never original browser storage. Original regression gate remains separate.' > output/IOS-SCOPE.txt
+      - name: Collect scoped native probe lifecycle diagnostics
+        if: always()
+        run: |
+          if [ -f output/simulator-udid.txt ]; then
+            xcrun simctl spawn "$(cat output/simulator-udid.txt)" log show --last 15m --style compact --predicate 'process == "App" AND eventMessage BEGINSWITH "TrainOracleNativeProbe:"' > output/native-ios-probe-lifecycle.log 2>/dev/null || true
+          fi
       - name: Capture available simulator state on failure
         if: failure()
         run: |
