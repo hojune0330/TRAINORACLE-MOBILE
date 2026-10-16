@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { ROOT } from './android-runtime-probe.mjs';
-import { EXAMPLE_BUTTON, parseArgs, pngMetadata, changedExample, pngExportCandidates, parseUiXml, centerFromBounds, localSaveControls, nativeSaveStatus } from './android-native-ui-smoke.mjs';
+import { EXAMPLE_BUTTON, parseArgs, pngMetadata, changedExample, pngExportCandidates, parseUiXml, centerFromBounds, localSaveControls, nativeSaveStatus, storeScreenshotMetadata, jsonExportMetadata, observedButtonCount, JSON_ROUTE, followJsonRoute } from './android-native-ui-smoke.mjs';
 
 // Fixtures only: never run the app, source tests, emulator, ADB, network, native
 // compilation, account flows or runSmoke. Importing the CLI has no side effects.
@@ -16,10 +16,11 @@ function node(attrs, children = '') {
 function picker({ folder = 'Downloads', fieldCount = 1, saveCount = 1, packageName = pkg, filename = 'existing.png' } = {}) {
   return '<?xml version="1.0"?><hierarchy>' + node({ 'resource-id': pkg + ':id/toolbar' }, node({ text: folder })) + Array.from({ length: fieldCount }, () => node({ class: 'android.widget.EditText', text: filename, package: packageName })).join('') + Array.from({ length: saveCount }, () => node({ text: 'Save', clickable: 'true', package: packageName, bounds: '[300,600][500,700]' })).join('') + '</hierarchy>';
 }
-test('CLI accepts only no arguments or one optional PNG-export switch', () => {
+test('CLI preserves PNG mode and permits exactly one optional JSON-export switch', () => {
   assert.deepEqual(parseArgs([]), { exportPng: false });
   assert.deepEqual(parseArgs(['--export-png']), { exportPng: true });
-  for (const args of [['--phase', 'write'], ['--origin', 'https://example.com'], ['--export-png', '--export-png']]) assert.throws(() => parseArgs(args));
+  assert.deepEqual(parseArgs(['--export-json']), { exportPng: false, exportJson: true });
+  for (const args of [['--phase', 'write'], ['--origin', 'https://example.com'], ['--export-png', '--export-png'], ['--export-json', '--export-png'], ['--export-json', '--export-json']]) assert.throws(() => parseArgs(args));
   assert.equal(EXAMPLE_BUTTON, '운동 분석 예시 보기');
 });
 test('actual changed UI requires substantial fresh ARIA, not a click or loading indicator', () => {
@@ -77,7 +78,67 @@ test('implementation scope is installed UI only and keeps native runtime gates s
   assert.match(text, /connectNativePage\(/);
   assert.match(text, /screencap/); assert.match(text, /uiautomator/);
   assert.match(text, /beforeSave\.field\.text !== filename/);
-  assert.match(text, /pngMetadata\(await readFile\(local\)\)/);
+  assert.match(text, /jsonExportMetadata\(bytes\)/);
+  assert.match(text, /pngMetadata\(bytes\)/);
+  assert.match(text, /storeScreenshotMetadata\(await readFile\(local\)\)/);
+  const connectIndex = text.indexOf('connection = await connectNativePage');
+  const displayIndex = text.indexOf("await adbRun(['shell', 'wm', 'size', '1080x1920'])");
+  assert.ok(connectIndex > text.indexOf('assertHostedRuntime();'));
+  assert.ok(displayIndex > connectIndex);
+  assert.ok(displayIndex < text.indexOf("const home = await page.locator('body').ariaSnapshot"));
+  assert.ok(text.indexOf("screenshot('example')") < text.indexOf('await followJsonRoute'));
+  assert.doesNotMatch(text, /setViewportSize|deviceScaleFactor|addStyleTag|\.resize\(|\.crop\(/);
   assert.doesNotMatch(text, /runProbe\(|indexedDB|localStorage|newPage\(|launchBrowser\(|navigator\.locks\s*=|pm clear|uninstall|npm (?:ci|test)|gradlew|xcodebuild|fetch\(/);
   assert.equal((text.match(/await exportButton\.click\(/g) || []).length, 1);
+});
+
+function jsonFixture(changes = {}) {
+  return Buffer.from(JSON.stringify({ app: 'TRAINORACLE', format: 'trainoracle.journal.v1', exportedAt: '2026-10-16T00:00:00.000Z', entries: [], ...changes }));
+}
+test('saved JSON must be nonempty valid UTF-8 and match pinned safe empty-journal format', () => {
+  const bytes = jsonFixture();
+  assert.deepEqual(jsonExportMetadata(bytes), { bytes: bytes.length, validJson: true, pinnedFormat: true, emptyEntries: true });
+  for (const bytes of [Buffer.alloc(0), Buffer.from('{broken'), Buffer.from([0xff]), Buffer.from('null'), Buffer.from('[]'), jsonFixture({ app: 'OTHER' }), jsonFixture({ format: 'trainoracle.journal.full-backup.v5' }), jsonFixture({ entries: [{ privateField: 'PRIVATE_SENTINEL' }] }), jsonFixture({ entries: {} }), jsonFixture({ exportedAt: 'not a date' }), jsonFixture({ unexpected: 'PRIVATE_SENTINEL' })]) {
+    assert.throws(() => jsonExportMetadata(bytes), error => !error.message.includes('PRIVATE_SENTINEL'));
+  }
+});
+test('JSON save success cannot be inferred from picker presence or a Save click', () => {
+  assert.equal(nativeSaveStatus({ requested: true, candidateCount: 1, saveClicked: true, bytesVerified: false }), 'failed');
+  assert.equal(nativeSaveStatus({ requested: true, candidateCount: 1, saveClicked: false, bytesVerified: true }), 'failed');
+  assert.equal(nativeSaveStatus({ requested: true, candidateCount: 1, saveClicked: true, bytesVerified: true }), 'passed');
+  assert.ok(localSaveControls(picker({ filename: 'trainoracle-native-ci-123-456.json' })));
+  assert.equal(localSaveControls(picker({ filename: 'owned.json', folder: 'Google Drive' })), null);
+});
+test('JSON route uses separately observed exact buttons and leaves final export unclicked', async () => {
+  const observed = [], clicked = [];
+  const final = await followJsonRoute(async (name, index) => {
+    observed.push(name);
+    const aria = '- main:\n  - button "' + name + '"\n';
+    assert.equal(observedButtonCount(aria, name), 1);
+    return { click: async () => clicked.push(index) };
+  });
+  assert.deepEqual(observed, ['홈', '더보기', '백업·복원·휴지통', '내 일지 데이터 내려받기 (JSON)']);
+  assert.deepEqual(observed, [...JSON_ROUTE]);
+  assert.deepEqual(clicked, [0, 1, 2]);
+  assert.equal(typeof final.click, 'function');
+});
+test('missing/ambiguous/disabled fresh JSON route states never guess a target', async () => {
+  const label = JSON_ROUTE[2];
+  assert.equal(observedButtonCount('- button "' + label + '"\n- button "' + label + '"', label), 2);
+  assert.equal(observedButtonCount('- button "' + label + '" [disabled]', label), 0);
+  assert.equal(observedButtonCount('- text: ' + label, label), 0);
+  assert.equal(observedButtonCount('- button "백업 복원 휴지통"', label), 0);
+  const clicked = [];
+  const result = await followJsonRoute(async (_, index) => index === 2 ? null : { click: async () => clicked.push(index) });
+  assert.equal(result, null); assert.deepEqual(clicked, [0, 1]);
+});
+test('store screenshot gate accepts only actual capture dimensions 1080x1920', () => {
+  // Synthetic header fixtures test only the metadata gate, never create screenshots.
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a7WQAAAAASUVORK5CYII=', 'base64');
+  const correct = Buffer.from(png); correct.writeUInt32BE(1080, 16); correct.writeUInt32BE(1920, 20);
+  assert.equal(storeScreenshotMetadata(correct).height, 1920);
+  for (const [width, height] of [[1080, 2400], [1920, 1080], [1080, 2160], [1, 1]]) {
+    const wrong = Buffer.from(png); wrong.writeUInt32BE(width, 16); wrong.writeUInt32BE(height, 20);
+    assert.throws(() => storeScreenshotMetadata(wrong), /1080x1920/);
+  }
 });

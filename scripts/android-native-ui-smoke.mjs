@@ -8,13 +8,45 @@ export const EXAMPLE_BUTTON = '운동 분석 예시 보기';
 export function parseArgs(args) {
   if (args.length === 0) return { exportPng: false };
   if (args.length === 1 && args[0] === '--export-png') return { exportPng: true };
-  throw new Error('Use no arguments or --export-png only');
+  if (args.length === 1 && args[0] === '--export-json') return { exportPng: false, exportJson: true };
+  throw new Error('Use no arguments, --export-png or --export-json only (one export maximum)');
 }
 export function pngMetadata(bytes) {
   if (!Buffer.isBuffer(bytes) || bytes.length < 45 || !bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) || bytes.toString('ascii', 12, 16) !== 'IHDR' || bytes.readUInt32BE(8) !== 13) throw new Error('Invalid PNG signature or header');
   const width = bytes.readUInt32BE(16), height = bytes.readUInt32BE(20);
   if (!width || !height || !bytes.includes(Buffer.from('IEND'))) throw new Error('Empty or incomplete PNG');
   return { width, height, bytes: bytes.length };
+}
+export function storeScreenshotMetadata(bytes) {
+  const meta = pngMetadata(bytes);
+  if (meta.width !== 1080 || meta.height !== 1920) throw new Error('Actual device screenshot must be 1080x1920');
+  return meta;
+}
+export function jsonExportMetadata(bytes) {
+  if (!Buffer.isBuffer(bytes) || bytes.length === 0 || bytes.length > 65536) throw new Error('Invalid empty-journal JSON byte size');
+  let value;
+  try { value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); } catch { throw new Error('Invalid JSON bytes'); }
+  if (!value || Array.isArray(value) || typeof value !== 'object' || value.app !== 'TRAINORACLE' || value.format !== 'trainoracle.journal.v1' || !Array.isArray(value.entries) || value.entries.length !== 0 || typeof value.exportedAt !== 'string' || !Number.isFinite(Date.parse(value.exportedAt)) || Object.keys(value).sort().join(',') !== 'app,entries,exportedAt,format') throw new Error('Pinned empty-journal JSON contract failed');
+  // Report only booleans and byte count, never serialized content or user fields.
+  return { bytes: bytes.length, validJson: true, pinnedFormat: true, emptyEntries: true };
+}
+export function observedButtonCount(aria, name) {
+  let count = 0;
+  for (const match of aria.matchAll(/^\s*- button "((?:\\.|[^"\\])*)"([^\n]*)$/gm)) {
+    let label; try { label = JSON.parse('"' + match[1] + '"'); } catch { continue; }
+    if (label === name && !match[2].includes('[disabled]')) count++;
+  }
+  return count;
+}
+export const JSON_ROUTE = Object.freeze(['홈', '더보기', '백업·복원·휴지통', '내 일지 데이터 내려받기 (JSON)']);
+export async function followJsonRoute(observe) {
+  for (let index = 0; index < JSON_ROUTE.length; index++) {
+    const button = await observe(JSON_ROUTE[index], index);
+    if (!button) return null;
+    if (index === JSON_ROUTE.length - 1) return button;
+    await button.click({ timeout: 10000 });
+  }
+  return null;
 }
 export function changedExample(home, example) {
   if (typeof home !== 'string' || typeof example !== 'string' || example.trim().length < 50 || example === home || /기록을 확인하지 못|Application error|\bprogressbar\b/.test(example)) return false;
@@ -29,9 +61,9 @@ export function pngExportCandidates(aria) {
   }
   return names;
 }
-export function nativeSaveStatus({ requested, candidateCount, saveClicked = false, pngVerified = false }) {
+export function nativeSaveStatus({ requested, candidateCount, saveClicked = false, pngVerified = false, bytesVerified = false }) {
   if (!requested || candidateCount !== 1) return 'not_reached';
-  return saveClicked === true && pngVerified === true ? 'passed' : 'failed';
+  return saveClicked === true && (pngVerified === true || bytesVerified === true) ? 'passed' : 'failed';
 }
 function entity(value) {
   return value.replace(/&#x([0-9a-f]+);|&#([0-9]+);|&(quot|apos|amp|lt|gt);/gi, (_, hex, dec, named) => hex ? String.fromCodePoint(parseInt(hex, 16)) : dec ? String.fromCodePoint(Number(dec)) : ({ quot: '"', apos: "'", amp: '&', lt: '<', gt: '>' })[named.toLowerCase()]);
@@ -75,8 +107,9 @@ function command(adb, serial, args, timeoutMs = 15000) {
   });
 }
 async function pause(ms) { await new Promise(ok => setTimeout(ok, ms)); }
-export async function runSmoke({ exportPng = false } = {}) {
+export async function runSmoke({ exportPng = false, exportJson = false } = {}) {
   assertHostedRuntime();
+  if (exportPng && exportJson) throw new Error('At most one export mode is allowed');
   const target = parseAndroidTarget();
   const sdk = process.env.ANDROID_SDK_ROOT || process.env.ANDROID_HOME;
   if (!sdk) throw new Error('Android SDK is required');
@@ -84,7 +117,7 @@ export async function runSmoke({ exportPng = false } = {}) {
   const output = resolve(ROOT, 'output');
   await mkdir(output, { recursive: true });
   const id = 'trainoracle-native-ci-' + Date.now() + '-' + target.pid;
-  const report = { scope: 'installed-native-ui-only', ui: 'not_reached', homeScreenshot: false, exampleScreenshot: false, exampleChanged: false, export: { status: 'not_reached', reason: exportPng ? 'example-not-reached' : 'not-requested' } };
+  const report = { scope: 'installed-native-ui-only', ui: 'not_reached', homeScreenshot: false, exampleScreenshot: false, exampleChanged: false, export: { status: 'not_reached', reason: exportPng || exportJson ? 'example-not-reached' : 'not-requested' } };
   const diagnostics = [];
   let connection;
   const adbRun = args => command(adb, target.serial, args);
@@ -92,7 +125,7 @@ export async function runSmoke({ exportPng = false } = {}) {
     const remote = '/sdcard/' + id + '-' + name + '.png', local = join(output, 'trainoracle-android-store-' + name + '.png');
     await adbRun(['shell', 'screencap', '-p', remote]);
     await adbRun(['pull', remote, local]);
-    const meta = pngMetadata(await readFile(local));
+    const meta = storeScreenshotMetadata(await readFile(local));
     await adbRun(['shell', 'rm', '-f', remote]);
     return meta;
   }
@@ -107,6 +140,10 @@ export async function runSmoke({ exportPng = false } = {}) {
   try {
     connection = await connectNativePage((await import('playwright-core'))._android, { target, diagnostic: event => { if (diagnostics.length < 100) diagnostics.push(event); } });
     const page = connection.page;
+    // Hosted emulator and exact debug package/PID have been verified above.
+    // Change the REAL emulator display, never CSS, viewport emulation or pixels.
+    await adbRun(['shell', 'wm', 'size', '1080x1920']);
+    report.displayOverrideApplied = true;
     await page.waitForFunction(() => document.readyState === 'complete', null, { timeout: 15000 });
     if (!isNativePage(page.url())) throw new Error('Unexpected native origin');
     const home = await page.locator('body').ariaSnapshot({ timeout: 5000 });
@@ -127,13 +164,36 @@ export async function runSmoke({ exportPng = false } = {}) {
     if (!isNativePage(page.url()) || !stable || !changedExample(home, example)) throw new Error('Actual example UI did not reach a stable changed state');
     report.exampleChanged = true;
     report.exampleImage = await screenshot('example'); report.exampleScreenshot = true; report.ui = 'passed';
-    if (exportPng) {
-      const candidates = pngExportCandidates(example);
-      report.export = { status: 'not_reached', reason: candidates.length === 0 ? 'no-unambiguous-png-or-image-export-button' : 'ambiguous-export-buttons', candidateCount: candidates.length };
-      if (candidates.length === 1) {
-        const exportButton = page.getByRole('button', { name: candidates[0], exact: true });
-        if (await exportButton.count() !== 1 || !await exportButton.isVisible()) throw new Error('Export button changed');
-        report.export = { status: 'failed', reason: 'native-save-not-verified', stage: 'export-click' };
+    if (exportPng || exportJson) {
+      const mode = exportJson ? 'json' : 'png';
+      let candidates = exportPng ? pngExportCandidates(example) : [];
+      let exportButton;
+      if (exportJson) {
+        report.export = { mode, status: 'not_reached', reason: 'json-route-not-observed', stage: 'route' };
+        exportButton = await followJsonRoute(async (name, index) => {
+          report.export.routeStep = index;
+          const routeDeadline = Date.now() + 6000;
+          while (Date.now() < routeDeadline) {
+            if (!isNativePage(page.url())) throw new Error('Unexpected native route origin');
+            const aria = await page.locator('body').ariaSnapshot({ timeout: 2000 });
+            await writeFile(join(output, 'android-ui-json-route-' + index + '-aria.txt'), aria + '\n');
+            const count = observedButtonCount(aria, name);
+            if (count > 1) return null;
+            if (count === 1) {
+              const observed = page.getByRole('button', { name, exact: true });
+              if (await observed.count() !== 1) return null;
+              if (await observed.isVisible() && await observed.isEnabled()) return observed;
+            }
+            await pause(250);
+          }
+          return null;
+        });
+        if (exportButton) candidates = [JSON_ROUTE[3]];
+      } else if (candidates.length === 1) exportButton = page.getByRole('button', { name: candidates[0], exact: true });
+      report.export = { mode, status: 'not_reached', reason: exportJson ? 'json-route-not-observed' : candidates.length === 0 ? 'no-unambiguous-png-or-image-export-button' : 'ambiguous-export-buttons', candidateCount: candidates.length };
+      if (candidates.length === 1 && exportButton) {
+        if (await exportButton.count() !== 1 || !await exportButton.isVisible() || !await exportButton.isEnabled()) throw new Error('Export button changed');
+        report.export = { mode, status: 'failed', reason: 'native-save-not-verified', stage: 'export-click' };
         await exportButton.click({ timeout: 10000 }); // At most ONE export request.
         let controls = null;
         // Read fresh OS state on each observation, never reuse coordinates across
@@ -144,7 +204,7 @@ export async function runSmoke({ exportPng = false } = {}) {
         }
         if (!controls) report.export.reason = 'picker-not-unambiguous-local-downloads';
         else {
-          const filename = id + '.png';
+          const filename = id + '.' + mode;
           if ((controls.field.text || '').length > 200) throw new Error('Unexpected filename field');
           await tap(controls.field);
           await adbRun(['shell', 'input', 'keyevent', 'KEYCODE_MOVE_END']);
@@ -154,17 +214,20 @@ export async function runSmoke({ exportPng = false } = {}) {
           if (!beforeSave || beforeSave.field.text !== filename) throw new Error('Unique CI filename or local Downloads location not confirmed');
           report.export.stage = 'save-click';
           await tap(beforeSave.save);
-          const local = join(output, 'trainoracle-android-native-export.png');
+          const local = join(output, 'trainoracle-android-native-export.' + mode);
           const saveDeadline = Date.now() + 12000;
           let saved = false;
           while (Date.now() < saveDeadline) {
             try {
               await command(adb, target.serial, ['pull', '/sdcard/Download/' + filename, local], 3000);
-              report.export.image = pngMetadata(await readFile(local)); saved = true; break;
+              const bytes = await readFile(local);
+              if (exportJson) report.export.validation = jsonExportMetadata(bytes);
+              else report.export.image = pngMetadata(bytes);
+              saved = true; break;
             } catch { await pause(400); }
           }
-          report.export.status = nativeSaveStatus({ requested: true, candidateCount: 1, saveClicked: true, pngVerified: saved });
-          report.export.reason = saved ? 'unique-local-download-png-bytes-verified' : 'no-valid-png-at-owned-local-path';
+          report.export.status = nativeSaveStatus({ requested: true, candidateCount: 1, saveClicked: true, bytesVerified: saved });
+          report.export.reason = saved ? 'unique-local-download-' + mode + '-bytes-verified' : 'no-valid-' + mode + '-at-owned-local-path';
           await dumpPicker('after-save');
         }
       }
@@ -179,8 +242,8 @@ export async function runSmoke({ exportPng = false } = {}) {
     await writeFile(join(output, 'android-native-ui-connection.json'), JSON.stringify(diagnostics, null, 2) + '\n');
     if (connection) await connection.browser.close();
   }
-  if (report.export.status === 'failed') throw new Error('UI passed but optional native PNG save did not pass; inspect smoke report');
-  console.log('Installed Android UI smoke: ' + report.ui + '; native PNG export: ' + report.export.status);
+  if (report.export.status === 'failed') throw new Error('UI passed but requested native document save did not pass; inspect smoke report');
+  console.log('Installed Android UI smoke: ' + report.ui + '; native document export: ' + report.export.status);
   return report;
 }
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {

@@ -1,0 +1,90 @@
+name: Existing iOS simulator app required-size screenshot (no signing or store upload)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  required-medium-iphone:
+    runs-on: macos-15
+    timeout-minutes: 15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+    defaults:
+      run:
+        working-directory: publisher
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: publisher
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: 24.19.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: ios-simulator-candidate-38846323960
+          run-id: 38846323960
+          github-token: ${{ github.token }}
+          path: publisher/candidate-input
+      - name: Verify artifact origin and unpack the already-compiled simulator app
+        run: |
+          mkdir -p output
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const meta=JSON.parse(fs.readFileSync('candidate-input/native-generation-ios.json','utf8'));
+          if(meta.sourceSha!=='0b3c12f67617ff610005dbb558388c4b5899bb83'||meta.signingConfigured!==false)throw Error('Unexpected app source/signing');
+          NODE
+          ditto -x -k candidate-input/TrainOracle-ios-SIMULATOR.zip "$RUNNER_TEMP/trainoracle-existing-app"
+          APP="$RUNNER_TEMP/trainoracle-existing-app/App.app"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist")" = io.trainoracle.app.debug
+      - name: Capture actual UI at Apple's required Dynamic Island medium size
+        run: |
+          xcrun simctl list devices available --json > output/simulators.json
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const d=JSON.parse(fs.readFileSync('output/simulators.json','utf8')).devices;
+          const runtimes=Object.keys(d).filter(k=>k.includes('.iOS-26-')).sort((a,b)=>b.localeCompare(a,undefined,{numeric:true}));
+          let found;
+          for(const r of runtimes){const devices=d[r].filter(x=>x.isAvailable);for(const name of ['iPhone 17 Pro','iPhone 17','iPhone 16 Pro']){found=devices.find(x=>x.name===name);if(found)break;}if(found)break;}
+          if(!found)throw Error('Required Dynamic Island medium simulator unavailable');
+          fs.writeFileSync('output/simulator-udid.txt',found.udid);
+          fs.writeFileSync('output/ios-screenshot-origin.json',JSON.stringify({sourceArtifactRun:38846323960,sourceCommit:'53f16fcc3c38cf3918114199adb9d4ac91115e4a',sourceSha:'0b3c12f67617ff610005dbb558388c4b5899bb83',harnessCommit:process.env.GITHUB_SHA,device:found.name,rebuildPerformed:false,signingPerformed:false,storeUploadPerformed:false},null,2));
+          NODE
+          DEVICE=$(cat output/simulator-udid.txt)
+          APP="$RUNNER_TEMP/trainoracle-existing-app/App.app"
+          cleanup() { xcrun simctl shutdown "$DEVICE" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          xcrun simctl boot "$DEVICE"
+          xcrun simctl bootstatus "$DEVICE" -b
+          xcrun simctl install "$DEVICE" "$APP"
+          DATA=$(xcrun simctl get_app_container "$DEVICE" io.trainoracle.app.debug data)
+          mkdir -p "$DATA/Library/Caches/TrainOracleNativeCI"
+          printf '%s\n' '{"phase":"write"}' > "$DATA/Library/Caches/TrainOracleNativeCI/native-probe-request.json"
+          SIMCTL_CHILD_TRAINORACLE_NATIVE_PROBE=write xcrun simctl launch --terminate-running-process "$DEVICE" io.trainoracle.app.debug --trainoracle-native-probe write
+          for i in $(seq 1 180); do test -s "$DATA/Library/Caches/TrainOracleNativeCI/native-release-probe.json" && break; sleep 1; done
+          cp "$DATA/Library/Caches/TrainOracleNativeCI/native-release-probe.json" output/native-ios-screenshot-probe.json
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const p=JSON.parse(fs.readFileSync('output/native-ios-screenshot-probe.json','utf8'));
+          if(p.probeReady!==true||p.rootRendered!==true||p.coreContentPresent!==true||p.nativeDocumentsAvailable!==true||p.storageFailureVisible!==false)throw Error('Native UI not ready for screenshot');
+          NODE
+          xcrun simctl io "$DEVICE" screenshot output/trainoracle-ios-store-home-medium.png
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const b=fs.readFileSync('output/trainoracle-ios-store-home-medium.png');
+          const w=b.readUInt32BE(16),h=b.readUInt32BE(20);
+          if(![[1179,2556],[1206,2622]].some(([x,y])=>x===w&&y===h))throw Error('Unexpected required-medium screenshot dimensions');
+          fs.writeFileSync('output/ios-screenshot-dimensions.json',JSON.stringify({width:w,height:h,source:'actual-simulator-screencap',resized:false,cropped:false},null,2));
+          NODE
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: ios-required-screenshot-${{ github.run_id }}
+          path: publisher/output/
+          if-no-files-found: warn
+          retention-days: 1
+          compression-level: 9

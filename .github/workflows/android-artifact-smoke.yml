@@ -58,7 +58,7 @@ jobs:
           fs.copyFileSync('candidate-input/web-build-receipt.json','output/web-build-receipt.json');
           fs.writeFileSync('output/android-tested-artifact-origin.json',JSON.stringify({sourceArtifactRun:38841274227,sourceArtifact:'android-candidate-38841274227',apkSha256:actual,harnessCommit:process.env.GITHUB_SHA,signingPerformed:false,rebuildPerformed:false,storeUploadPerformed:false,scope:'native-artifact-smoke-only'},null,2));
           NODE
-      - name: Same APK real capabilities, update-install persistence, screenshots and optional native PNG save
+      - name: Same APK real capabilities, update-install persistence, store-size screenshots and native JSON save
         run: bash scripts/run-android-runtime.sh
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
