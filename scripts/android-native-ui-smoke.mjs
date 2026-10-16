@@ -98,12 +98,59 @@ export function localSaveControls(xml) {
   centerFromBounds(fields[0].bounds); centerFromBounds(saves[0].bounds);
   return { field: fields[0], save: saves[0] };
 }
+export function safeHandoffError(error) {
+  const timedOut = error?.timedOut === true || error?.name === 'TimeoutError' || /timeout|timed out/i.test(String(error?.message || ''));
+  const type = timedOut ? 'timeout' : error?.safeType === 'adb-exit' ? 'adb-exit' : error?.safeType === 'adb-unavailable' ? 'adb-unavailable' : error?.code === 'ENOENT' ? 'file-missing' : /closed|disconnected/i.test(String(error?.message || '')) ? 'target-closed' : 'operation-error';
+  return { errorType: type, timedOut, exitNonzero: error?.safeType === 'adb-exit' };
+}
+async function boundedHandoff(operation, timeoutMs) {
+  let timer;
+  try { return await Promise.race([Promise.resolve().then(operation), new Promise((_, reject) => { timer = setTimeout(() => reject(Object.assign(new Error('Operation timed out'), { timedOut: true })), timeoutMs); })]); }
+  finally { clearTimeout(timer); }
+}
+export async function observeNativeHandoff({ click, screenshot, dump, event = () => {}, wait = pause, clickTimeoutMs = 8000 }) {
+  const evidence = { clickAttempted: true, clickReturned: false, clickTimedOut: false, nativeScreenCaptured: false, xmlSnapshots: 0, documentsUiObserved: false, appUiObservedWithoutDocumentsUi: false, accepted: false };
+  const emit = value => event(value); // All caller stages/types below are fixed, never exception text.
+  emit({ stage: 'export-click', outcome: 'started' });
+  try {
+    // Exactly one trusted action. Native focus handoff can invalidate the CDP
+    // callback without invalidating the action, so its return is diagnostic only.
+    await boundedHandoff(() => click({ timeout: clickTimeoutMs, noWaitAfter: true }), clickTimeoutMs + 100);
+    evidence.clickReturned = true;
+    emit({ stage: 'export-click', outcome: 'returned', timedOut: false });
+  } catch (error) {
+    const safe = safeHandoffError(error); evidence.clickTimedOut = safe.timedOut;
+    emit({ stage: 'export-click', outcome: 'callback-error', ...safe });
+  }
+  try { await screenshot(); evidence.nativeScreenCaptured = true; emit({ stage: 'native-screenshot', outcome: 'captured' }); }
+  catch (error) { emit({ stage: 'native-screenshot', outcome: 'error', ...safeHandoffError(error) }); }
+  let controls = null;
+  for (let attempt = 1; attempt <= 3 && !controls; attempt++) {
+    emit({ stage: 'native-xml', attempt, outcome: 'started' });
+    try {
+      const xml = await dump(attempt);
+      const nodes = parseUiXml(xml);
+      evidence.xmlSnapshots++;
+      const documentsUi = nodes.some(node => /^(?:com\.google\.android\.documentsui|com\.android\.documentsui)$/.test(node.package || ''));
+      const appUi = nodes.some(node => node.package === 'io.trainoracle.app.debug');
+      evidence.documentsUiObserved ||= documentsUi;
+      evidence.appUiObservedWithoutDocumentsUi ||= appUi && !documentsUi;
+      controls = localSaveControls(xml);
+      emit({ stage: 'native-xml', attempt, outcome: 'observed', documentsUi, appUi, localSaveReady: Boolean(controls) });
+    } catch (error) { emit({ stage: 'native-xml', attempt, outcome: 'error', ...safeHandoffError(error) }); }
+    if (!controls && attempt < 3) await wait(500);
+  }
+  evidence.accepted = Boolean(controls);
+  evidence.conclusion = controls ? 'fresh-local-save-controls-observed' : evidence.appUiObservedWithoutDocumentsUi && !evidence.documentsUiObserved ? 'app-ui-observed-without-documentsui' : evidence.documentsUiObserved ? 'documentsui-without-proven-local-save-controls' : 'native-ui-unobserved';
+  emit({ stage: 'native-handoff', outcome: evidence.accepted ? 'accepted' : 'unconfirmed' });
+  return { controls, evidence };
+}
 function command(adb, serial, args, timeoutMs = 15000) {
   return new Promise((ok, bad) => {
     const child = spawn(adb, ['-s', serial, ...args], { stdio: 'ignore', windowsHide: true });
-    const timer = setTimeout(() => { child.kill('SIGKILL'); bad(new Error('ADB command timed out')); }, timeoutMs);
-    child.once('error', () => { clearTimeout(timer); bad(new Error('ADB command unavailable')); });
-    child.once('exit', code => { clearTimeout(timer); code === 0 ? ok() : bad(new Error('ADB command failed')); });
+    const timer = setTimeout(() => { child.kill('SIGKILL'); bad(Object.assign(new Error('ADB command timed out'), { timedOut: true })); }, timeoutMs);
+    child.once('error', () => { clearTimeout(timer); bad(Object.assign(new Error('ADB command unavailable'), { safeType: 'adb-unavailable' })); });
+    child.once('exit', code => { clearTimeout(timer); code === 0 ? ok() : bad(Object.assign(new Error('ADB command failed'), { safeType: 'adb-exit' })); });
   });
 }
 async function pause(ms) { await new Promise(ok => setTimeout(ok, ms)); }
@@ -118,11 +165,12 @@ export async function runSmoke({ exportPng = false, exportJson = false } = {}) {
   await mkdir(output, { recursive: true });
   const id = 'trainoracle-native-ci-' + Date.now() + '-' + target.pid;
   const report = { scope: 'installed-native-ui-only', ui: 'not_reached', homeScreenshot: false, exampleScreenshot: false, exampleChanged: false, export: { status: 'not_reached', reason: exportPng || exportJson ? 'example-not-reached' : 'not-requested' } };
-  const diagnostics = [];
+  const diagnostics = [], handoffEvents = [];
+  const handoffEvent = event => { if (handoffEvents.length < 100) handoffEvents.push(event); };
   let connection;
   const adbRun = args => command(adb, target.serial, args);
-  async function screenshot(name) {
-    const remote = '/sdcard/' + id + '-' + name + '.png', local = join(output, 'trainoracle-android-store-' + name + '.png');
+  async function screenshot(name, artifactName = 'trainoracle-android-store-' + name + '.png') {
+    const remote = '/sdcard/' + id + '-' + name + '.png', local = join(output, artifactName);
     await adbRun(['shell', 'screencap', '-p', remote]);
     await adbRun(['pull', remote, local]);
     const meta = storeScreenshotMetadata(await readFile(local));
@@ -130,11 +178,22 @@ export async function runSmoke({ exportPng = false, exportJson = false } = {}) {
     return meta;
   }
   async function dumpPicker(stage) {
-    const remote = '/sdcard/' + id + '-picker.xml', local = join(output, 'android-ui-picker-' + stage + '.xml');
-    await adbRun(['shell', 'uiautomator', 'dump', remote]);
-    await adbRun(['pull', remote, local]);
-    await adbRun(['shell', 'rm', '-f', remote]);
-    return await readFile(local, 'utf8');
+    // A distinct owned path per observation prevents a failed dump from being
+    // mistaken for fresh XML. The first dump runs even after a click callback error.
+    const remote = '/sdcard/' + id + '-picker-' + stage + '.xml', local = join(output, 'android-ui-picker-' + stage + '.xml');
+    handoffEvent({ stage: 'uiautomator-dump', observation: stage, outcome: 'started', timeoutMs: 25000 });
+    try { await command(adb, target.serial, ['shell', 'uiautomator', 'dump', '--compressed', remote], 25000); }
+    catch (error) { handoffEvent({ stage: 'uiautomator-dump', observation: stage, outcome: 'error', ...safeHandoffError(error) }); throw error; }
+    handoffEvent({ stage: 'uiautomator-dump', observation: stage, outcome: 'completed' });
+    try { await adbRun(['pull', remote, local]); }
+    catch (error) { handoffEvent({ stage: 'picker-xml-pull', observation: stage, outcome: 'error', ...safeHandoffError(error) }); throw error; }
+    handoffEvent({ stage: 'picker-xml-pull', observation: stage, outcome: 'completed' });
+    let xml;
+    try { xml = await readFile(local, 'utf8'); handoffEvent({ stage: 'picker-xml-read', observation: stage, outcome: 'completed' }); }
+    catch (error) { handoffEvent({ stage: 'picker-xml-read', observation: stage, outcome: 'error', ...safeHandoffError(error) }); throw error; }
+    try { await adbRun(['shell', 'rm', '-f', remote]); }
+    catch (error) { handoffEvent({ stage: 'picker-temp-cleanup', observation: stage, outcome: 'error', ...safeHandoffError(error) }); }
+    return xml;
   }
   async function tap(node) { await adbRun(['shell', 'input', 'tap', ...centerFromBounds(node.bounds).map(String)]); }
   try {
@@ -193,18 +252,28 @@ export async function runSmoke({ exportPng = false, exportJson = false } = {}) {
       report.export = { mode, status: 'not_reached', reason: exportJson ? 'json-route-not-observed' : candidates.length === 0 ? 'no-unambiguous-png-or-image-export-button' : 'ambiguous-export-buttons', candidateCount: candidates.length };
       if (candidates.length === 1 && exportButton) {
         if (await exportButton.count() !== 1 || !await exportButton.isVisible() || !await exportButton.isEnabled()) throw new Error('Export button changed');
-        report.export = { mode, status: 'failed', reason: 'native-save-not-verified', stage: 'export-click' };
-        await exportButton.click({ timeout: 10000 }); // At most ONE export request.
-        let controls = null;
-        // Read fresh OS state on each observation, never reuse coordinates across
-        // an action or navigate a guessed cloud/root/location.
-        for (let attempt = 0; attempt < 3 && !controls; attempt++) {
-          controls = localSaveControls(await dumpPicker('opened'));
-          if (!controls && attempt < 2) await pause(500);
-        }
-        if (!controls) report.export.reason = 'picker-not-unambiguous-local-downloads';
-        else {
+        report.export = { mode, status: 'failed', reason: 'native-save-not-verified', stage: 'native-handoff-observation' };
+        const handoff = await observeNativeHandoff({
+          click: options => exportButton.click(options), // The sole export click, never retried.
+          screenshot: () => screenshot('native-handoff', 'android-native-handoff-before-close.png'),
+          dump: attempt => dumpPicker('handoff-' + attempt),
+          event: handoffEvent,
+        });
+        report.export.handoff = handoff.evidence;
+        const controls = handoff.controls;
+        if (!controls) {
+          report.export.stage = 'native-handoff-unconfirmed';
+          report.export.reason = handoff.evidence.conclusion;
+          // This is supporting app evidence only, not proof the picker never opened.
+          try {
+            const aria = await page.locator('body').ariaSnapshot({ timeout: 2000 });
+            await writeFile(join(output, 'android-ui-after-export-unconfirmed-aria.txt'), aria + '\n');
+            handoffEvent({ stage: 'post-handoff-app-aria', outcome: 'captured' });
+          } catch (error) { handoffEvent({ stage: 'post-handoff-app-aria', outcome: 'error', ...safeHandoffError(error) }); }
+        } else {
+          report.export.stage = 'native-picker-accepted';
           const filename = id + '.' + mode;
+          report.export.stage = 'filename-edit';
           if ((controls.field.text || '').length > 200) throw new Error('Unexpected filename field');
           await tap(controls.field);
           await adbRun(['shell', 'input', 'keyevent', 'KEYCODE_MOVE_END']);
@@ -228,18 +297,21 @@ export async function runSmoke({ exportPng = false, exportJson = false } = {}) {
           }
           report.export.status = nativeSaveStatus({ requested: true, candidateCount: 1, saveClicked: true, bytesVerified: saved });
           report.export.reason = saved ? 'unique-local-download-' + mode + '-bytes-verified' : 'no-valid-' + mode + '-at-owned-local-path';
-          await dumpPicker('after-save');
+          try { await dumpPicker('after-save'); }
+          catch (error) { handoffEvent({ stage: 'after-save-evidence', outcome: 'error', ...safeHandoffError(error) }); }
         }
       }
     }
   } catch (error) {
     if (report.ui !== 'passed') report.ui = 'failed';
     report.failure = connectionErrorCode(error);
-    if (report.export.status === 'failed') report.export.reason = 'export-step-failed';
+    if (report.export.status === 'failed') report.export.stepError = safeHandoffError(error);
     throw new Error('Native UI smoke failed (' + report.failure + ')');
   } finally {
     await writeFile(join(output, 'android-native-ui-smoke.json'), JSON.stringify(report, null, 2) + '\n');
     await writeFile(join(output, 'android-native-ui-connection.json'), JSON.stringify(diagnostics, null, 2) + '\n');
+    // Persist native observations before CDP disconnect can change foreground UI.
+    await writeFile(join(output, 'android-native-export-handoff.json'), JSON.stringify(handoffEvents, null, 2) + '\n');
     if (connection) await connection.browser.close();
   }
   if (report.export.status === 'failed') throw new Error('UI passed but requested native document save did not pass; inspect smoke report');

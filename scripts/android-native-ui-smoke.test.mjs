@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { ROOT } from './android-runtime-probe.mjs';
-import { EXAMPLE_BUTTON, parseArgs, pngMetadata, changedExample, pngExportCandidates, parseUiXml, centerFromBounds, localSaveControls, nativeSaveStatus, storeScreenshotMetadata, jsonExportMetadata, observedButtonCount, JSON_ROUTE, followJsonRoute } from './android-native-ui-smoke.mjs';
+import { EXAMPLE_BUTTON, parseArgs, pngMetadata, changedExample, pngExportCandidates, parseUiXml, centerFromBounds, localSaveControls, nativeSaveStatus, storeScreenshotMetadata, jsonExportMetadata, observedButtonCount, JSON_ROUTE, followJsonRoute, observeNativeHandoff, safeHandoffError } from './android-native-ui-smoke.mjs';
 
 // Fixtures only: never run the app, source tests, emulator, ADB, network, native
 // compilation, account flows or runSmoke. Importing the CLI has no side effects.
@@ -89,7 +89,10 @@ test('implementation scope is installed UI only and keeps native runtime gates s
   assert.ok(text.indexOf("screenshot('example')") < text.indexOf('await followJsonRoute'));
   assert.doesNotMatch(text, /setViewportSize|deviceScaleFactor|addStyleTag|\.resize\(|\.crop\(/);
   assert.doesNotMatch(text, /runProbe\(|indexedDB|localStorage|newPage\(|launchBrowser\(|navigator\.locks\s*=|pm clear|uninstall|npm (?:ci|test)|gradlew|xcodebuild|fetch\(/);
-  assert.equal((text.match(/await exportButton\.click\(/g) || []).length, 1);
+  assert.equal((text.match(/exportButton\.click\(/g) || []).length, 1);
+  assert.match(text, /noWaitAfter: true/);
+  assert.match(text, /'uiautomator', 'dump', '--compressed', remote\], 25000/);
+  assert.ok(text.indexOf("'android-native-export-handoff.json'") < text.indexOf('await connection.browser.close()'));
 });
 
 function jsonFixture(changes = {}) {
@@ -141,4 +144,67 @@ test('store screenshot gate accepts only actual capture dimensions 1080x1920', (
     const wrong = Buffer.from(png); wrong.writeUInt32BE(width, 16); wrong.writeUInt32BE(height, 20);
     assert.throws(() => storeScreenshotMetadata(wrong), /1080x1920/);
   }
+});
+
+test('native handoff is accepted from fresh OS controls even when the sole click callback throws', async () => {
+  const calls = [], events = [];
+  const result = await observeNativeHandoff({
+    click: async options => { calls.push('click'); assert.equal(options.noWaitAfter, true); throw Error('Target closed PRIVATE_SENTINEL'); },
+    screenshot: async () => { calls.push('screenshot'); },
+    dump: async () => { calls.push('xml'); return picker(); },
+    event: value => events.push(value), wait: async () => {},
+  });
+  assert.deepEqual(calls, ['click', 'screenshot', 'xml']);
+  assert.equal(result.evidence.clickReturned, false);
+  assert.equal(result.evidence.accepted, true);
+  assert.equal(result.evidence.nativeScreenCaptured, true);
+  assert.ok(result.controls); assert.equal(result.evidence.xmlSnapshots, 1);
+  assert.equal(events[1].errorType, 'target-closed');
+  assert.doesNotMatch(JSON.stringify(events), /PRIVATE_SENTINEL|Target closed/);
+});
+test('bounded click timeout still observes native screenshot and XML without retrying the action', async () => {
+  let clicks = 0, screenshots = 0;
+  const result = await observeNativeHandoff({ click: () => { clicks++; return new Promise(() => {}); }, clickTimeoutMs: 1,
+    screenshot: async () => { screenshots++; }, dump: async () => picker(), wait: async () => {},
+  });
+  assert.equal(clicks, 1); assert.equal(screenshots, 1);
+  assert.equal(result.evidence.clickTimedOut, true); assert.equal(result.evidence.accepted, true);
+});
+test('first dump timeout or failed screenshot is diagnostic and cannot skip later fresh native observations', async () => {
+  let clicks = 0, dumps = 0;
+  const events = [];
+  const result = await observeNativeHandoff({
+    click: async () => { clicks++; }, screenshot: async () => { throw Object.assign(Error('secret screenshot failure'), { safeType: 'adb-exit' }); },
+    dump: async () => { dumps++; if (dumps === 1) throw Object.assign(Error('secret dump timeout'), { timedOut: true }); return picker(); },
+    event: value => events.push(value), wait: async () => {},
+  });
+  assert.equal(clicks, 1); assert.equal(dumps, 2); assert.equal(result.evidence.accepted, true);
+  assert.equal(result.evidence.nativeScreenCaptured, false);
+  assert.ok(events.some(event => event.stage === 'native-screenshot' && event.exitNonzero));
+  assert.ok(events.some(event => event.stage === 'native-xml' && event.attempt === 1 && event.timedOut));
+  assert.doesNotMatch(JSON.stringify(events), /secret/);
+});
+test('actual app-only XML yields explicit observed-without-DocumentsUI evidence, never a saved claim', async () => {
+  let clicks = 0, dumps = 0;
+  const xml = '<hierarchy>' + node({ package: 'io.trainoracle.app.debug', text: 'backup page' }) + '</hierarchy>';
+  const result = await observeNativeHandoff({ click: async () => { clicks++; }, screenshot: async () => {}, dump: async () => { dumps++; return xml; }, wait: async () => {} });
+  assert.equal(clicks, 1); assert.equal(dumps, 3); assert.equal(result.controls, null);
+  assert.equal(result.evidence.accepted, false); assert.equal(result.evidence.appUiObservedWithoutDocumentsUi, true);
+  assert.equal(result.evidence.conclusion, 'app-ui-observed-without-documentsui');
+  assert.equal(result.evidence.documentsUiObserved, false);
+});
+test('unfamiliar or ambiguous DocumentsUI never authorizes Save despite a returned click', async () => {
+  for (const xml of [picker({ folder: 'Google Drive' }), picker({ saveCount: 2 }), picker({ fieldCount: 2 })]) {
+    const result = await observeNativeHandoff({ click: async () => {}, screenshot: async () => {}, dump: async () => xml, wait: async () => {} });
+    assert.equal(result.evidence.clickReturned, true); assert.equal(result.evidence.documentsUiObserved, true);
+    assert.equal(result.evidence.accepted, false); assert.equal(result.controls, null);
+    assert.equal(result.evidence.conclusion, 'documentsui-without-proven-local-save-controls');
+  }
+});
+test('no successful native XML produces unknown evidence, not proof the picker never opened', async () => {
+  const result = await observeNativeHandoff({ click: async () => { throw Object.assign(Error('PRIVATE_SENTINEL'), { name: 'TimeoutError' }); }, screenshot: async () => {}, dump: async () => { throw Object.assign(Error('PRIVATE_SENTINEL'), { code: 'ENOENT' }); }, wait: async () => {} });
+  assert.equal(result.evidence.xmlSnapshots, 0); assert.equal(result.evidence.accepted, false);
+  assert.equal(result.evidence.conclusion, 'native-ui-unobserved');
+  assert.equal(result.evidence.clickTimedOut, true);
+  assert.deepEqual(safeHandoffError(Object.assign(Error('PRIVATE_SENTINEL'), { code: 'ENOENT' })), { errorType: 'file-missing', timedOut: false, exitNonzero: false });
 });
