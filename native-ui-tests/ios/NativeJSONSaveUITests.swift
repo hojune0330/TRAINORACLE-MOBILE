@@ -161,6 +161,96 @@ final class NativeJSONSaveUITests: XCTestCase {
     private func saveButton() throws -> XCUIElement {
         try unique(app.navigationBars.buttons, labels: ["Save", "SAVE", "저장"], timeout: 20)
     }
+    private func localPickerRoot(_ title: String) -> XCUIElement? {
+        // R12 exposes the provider and current directory in this actual AX ID.
+        // Never infer the current folder from its visible child label alone.
+        let identifier = "DOC.browsingRoot Source: com.apple.FileProvider.LocalStorage, Title: " + title
+        let roots = app.otherElements.matching(NSPredicate(format: "identifier == %@", identifier))
+            .allElementsBoundByIndex.filter { $0.exists }
+        guard roots.count == 1 else { return nil }
+        return roots[0]
+    }
+    private func ownedParentFolderCell() -> XCUIElement? {
+        guard let root = localPickerRoot("TrainOracle CI Destination") else { return nil }
+        let bars = root.navigationBars.matching(identifier: "FullDocumentManagerViewControllerNavigationBar")
+            .allElementsBoundByIndex.filter { $0.exists }
+        guard bars.count == 1 else { return nil }
+        let parentTitle = bars[0].buttons.matching(NSPredicate(format: "label == %@", "TrainOracle CI Destination, Actions Menu"))
+            .allElementsBoundByIndex.filter { $0.exists && $0.isHittable }
+        let localBack = bars[0].buttons.matching(NSPredicate(format: "identifier == %@ AND label IN %@", "BackButton", ["On My iPhone", "나의 iPhone"]))
+            .allElementsBoundByIndex.filter { $0.exists }
+        let saves = bars[0].buttons.matching(NSPredicate(format: "label IN %@", ["Save", "SAVE", "저장"]))
+            .allElementsBoundByIndex.filter { $0.exists && $0.isHittable }
+        let collections = root.collectionViews.matching(identifier: "File View")
+            .allElementsBoundByIndex.filter { $0.exists }
+        guard parentTitle.count == 1, localBack.count == 1, saves.count == 1,
+              collections.count == 1 else { return nil }
+        // The actual R12 icon-mode Cell owns the folder activation, not its
+        // lower StaticText caption. No coordinates, double-tap or guessed cell.
+        let cells = collections[0].cells.matching(identifier: "NativeJSONSave, Folder")
+            .allElementsBoundByIndex.filter { $0.exists }
+        guard cells.count == 1, cells[0].isHittable else { return nil }
+        let labels = cells[0].staticTexts.matching(NSPredicate(format: "label == %@", "NativeJSONSave"))
+            .allElementsBoundByIndex.filter { $0.exists }
+        guard labels.count == 1 else { return nil }
+        return cells[0]
+    }
+    private func ownedFolderProven() -> Bool {
+        guard let root = localPickerRoot("NativeJSONSave") else { return false }
+        // In R12 the navigation bar has a fixed identifier, NOT the directory
+        // name. Its Actions Menu title plus the local-provider root identify
+        // the newly opened folder without weakening the destination boundary.
+        let bars = root.navigationBars.matching(identifier: "FullDocumentManagerViewControllerNavigationBar")
+            .allElementsBoundByIndex.filter { $0.exists }
+        guard bars.count == 1 else { return false }
+        let title = bars[0].buttons.matching(NSPredicate(format: "label == %@", "NativeJSONSave, Actions Menu"))
+            .allElementsBoundByIndex.filter { $0.exists && $0.isHittable }
+        let parentBack = bars[0].buttons.matching(NSPredicate(format: "identifier == %@ AND label == %@", "BackButton", "TrainOracle CI Destination"))
+            .allElementsBoundByIndex.filter { $0.exists }
+        let saves = bars[0].buttons.matching(NSPredicate(format: "label IN %@", ["Save", "SAVE", "저장"]))
+            .allElementsBoundByIndex.filter { $0.exists && $0.isHittable }
+        let collections = root.collectionViews.matching(identifier: "File View")
+            .allElementsBoundByIndex.filter { $0.exists }
+        guard title.count == 1, parentBack.count == 1, saves.count == 1,
+              collections.count == 1 else { return false }
+        return collections[0].cells.allElementsBoundByIndex.filter { $0.exists }.isEmpty
+    }
+    private func waitForOwnedFolder(timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            if ownedFolderProven() { return true }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.25))
+        } while Date() < deadline
+        return false
+    }
+    private func openOwnedDestinationFolder() throws {
+        let deadline = Date().addingTimeInterval(20)
+        while ownedParentFolderCell() == nil && Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.25))
+        }
+        evidence("owned-parent-before-folder-cell-tap")
+        guard let first = ownedParentFolderCell() else {
+            try fail("Owned local parent and unique folder cell not proven")
+        }
+        first.tap()
+        if waitForOwnedFolder(timeout: 20) { evidence("owned-folder-opened-first-cell-tap"); return }
+        evidence("owned-folder-after-first-cell-tap")
+        if ownedFolderProven() { return }
+        // Only navigation can be retried once, and only from the exact same
+        // local parent with the exact same unique live folder Cell.
+        guard ownedParentFolderCell() != nil else {
+            try fail("owned-folder-navigation-unconfirmed: parent-state-not-proven")
+        }
+        evidence("owned-parent-before-single-folder-navigation-retry")
+        if ownedFolderProven() { return }
+        guard let retry = ownedParentFolderCell() else {
+            try fail("owned-folder-navigation-unconfirmed: parent-state-changed")
+        }
+        retry.tap()
+        if waitForOwnedFolder(timeout: 20) { evidence("owned-folder-opened-navigation-retry"); return }
+        evidence("owned-folder-after-single-navigation-retry")
+        try fail("owned-folder-navigation-unconfirmed")
+    }
     func testActualNativeJSONSaveToOwnedLocalFolder() throws {
         defer { evidence("final-state") }
         destination.launch()
@@ -189,12 +279,10 @@ final class NativeJSONSaveUITests: XCTestCase {
         evidence("proven-on-my-iphone")
         try location(["TrainOracle CI Destination"]).tap()
         evidence("owned-destination-app")
-        try location(["NativeJSONSave"]).tap()
-        guard app.navigationBars["NativeJSONSave"].waitForExistence(timeout: 15) else {
-            try fail("Owned local destination folder not proven")
-        }
-        let save = try saveButton()
+        try openOwnedDestinationFolder()
         evidence("owned-folder-before-save")
+        guard ownedFolderProven() else { try fail("Owned local destination folder not proven before Save") }
+        let save = try saveButton()
         // Keep the original suggested filename; never guess/edit picker fields.
         save.tap() // Exactly one real native Save activation.
         let dismissed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: save)
