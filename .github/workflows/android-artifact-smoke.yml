@@ -1,0 +1,70 @@
+name: Existing Android APK native UI and export (no signing or store upload)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: android-artifact-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-ui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: publisher
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: publisher
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: 24.19.0
+          cache: npm
+          cache-dependency-path: publisher/package-lock.json
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad
+        with:
+          distribution: temurin
+          java-version: '21'
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Wrapper fixtures only, not original source regression
+        run: node --test scripts/*.test.mjs
+      - name: Download the exact already-delivered test APK, do not rebuild or re-sign
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: android-candidate-38841274227
+          run-id: 38841274227
+          github-token: ${{ github.token }}
+          path: publisher/candidate-input
+      - name: Verify immutable APK bytes and source receipt
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          import {createHash} from 'node:crypto';
+          const apk=fs.readFileSync('candidate-input/TrainOracle-android-test.apk');
+          const expected='f09b59e88ee46f81c267d8cc9ee66ee48cd9447c2868a5661dc51f8cf40db623';
+          const actual=createHash('sha256').update(apk).digest('hex');
+          if(actual!==expected)throw Error('Existing APK digest mismatch');
+          const receipt=JSON.parse(fs.readFileSync('candidate-input/web-build-receipt.json','utf8'));
+          if(receipt.sourceSha!=='0b3c12f67617ff610005dbb558388c4b5899bb83')throw Error('Pinned source mismatch');
+          fs.mkdirSync('output',{recursive:true});
+          fs.writeFileSync('output/TrainOracle-android-test.apk',apk);
+          fs.copyFileSync('candidate-input/web-build-receipt.json','output/web-build-receipt.json');
+          fs.writeFileSync('output/android-tested-artifact-origin.json',JSON.stringify({sourceArtifactRun:38841274227,sourceArtifact:'android-candidate-38841274227',apkSha256:actual,harnessCommit:process.env.GITHUB_SHA,signingPerformed:false,rebuildPerformed:false,storeUploadPerformed:false,scope:'native-artifact-smoke-only'},null,2));
+          NODE
+      - name: Same APK real capabilities, update-install persistence, screenshots and optional native PNG save
+        run: bash scripts/run-android-runtime.sh
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: android-native-ui-${{ github.run_id }}
+          path: publisher/output/
+          if-no-files-found: warn
+          retention-days: 1
+          compression-level: 9

@@ -113,3 +113,5 @@ launch_and_forward
 timeout 150 node scripts/android-runtime-probe.mjs --phase read
 capture_screen
 printf '%s\n' 'Installed Android WebView runtime and same-APK persistence probes passed.'
+# Separate native UI/store-asset and optional OS export checks, not source regression.
+timeout 240 node scripts/android-native-ui-smoke.mjs --export-png
