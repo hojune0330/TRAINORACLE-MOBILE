@@ -301,6 +301,11 @@ export async function runSmoke({ exportPng = false, exportJson = false } = {}) {
           await adbRun(['shell', 'input', 'keyevent', 'KEYCODE_MOVE_END']);
           if (controls.field.text) await adbRun(['shell', 'input', 'keyevent', ...Array.from(controls.field.text, () => 'KEYCODE_DEL')]);
           await adbRun(['shell', 'input', 'text', filename]);
+          // The API 36 keyboard can occlude the Downloads breadcrumb from the
+          // compressed accessibility tree. Close it, then re-observe the full
+          // picker; never relax the location or unique filename checks.
+          await adbRun(['shell', 'input', 'keyevent', 'KEYCODE_BACK']);
+          report.export.stage = 'picker-recheck';
           const beforeSave = localSaveControls(await dumpPicker('before-save'));
           if (!beforeSave || beforeSave.field.text !== filename) throw new Error('Unique CI filename or local Downloads location not confirmed');
           report.export.stage = 'save-click';
@@ -326,7 +331,7 @@ export async function runSmoke({ exportPng = false, exportJson = false } = {}) {
     }
   } catch (error) {
     if (report.ui !== 'passed') report.ui = 'failed';
-    report.failure = connectionErrorCode(error);
+    report.failure = report.export.status === 'failed' ? 'native-export-unconfirmed' : connectionErrorCode(error);
     if (report.export.status === 'failed') report.export.stepError = safeHandoffError(error);
     throw new Error('Native UI smoke failed (' + report.failure + ')');
   } finally {

@@ -2,7 +2,7 @@
 
 원본 `hojune0330/TRAINORACLE`을 수정하지 않고 고정 소스를 앱 안에 번들링하는 독립 Capacitor 패키징 저장소입니다. 원격 웹사이트만 여는 앱이 아닙니다.
 
-- 원본 고정 커밋: `14df77217e12caa1d5c8290175d78e1274e14a4f` (`release-config.json`이 빌드 기준)
+- 원본 고정 커밋: `b744917a2add6b5aff2f69442fd54a90e1522ed9` (`release-config.json`이 빌드 기준)
 - 출시 식별자: `io.trainoracle.app`, `TrainOracle`
 - 테스트 식별자: `io.trainoracle.app.debug`, `TrainOracle Test`
 - 후보 버전: 1.0.0 (2)

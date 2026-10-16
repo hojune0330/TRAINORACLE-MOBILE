@@ -78,6 +78,12 @@ test('implementation scope is installed UI only and keeps native runtime gates s
   assert.match(text, /connectNativePage\(/);
   assert.match(text, /screencap/); assert.match(text, /uiautomator/);
   assert.match(text, /beforeSave\.field\.text !== filename/);
+  const inputIndex = text.indexOf("await adbRun(['shell', 'input', 'text', filename])");
+  const keyboardIndex = text.indexOf("await adbRun(['shell', 'input', 'keyevent', 'KEYCODE_BACK'])");
+  const recheckIndex = text.indexOf("localSaveControls(await dumpPicker('before-save'))");
+  assert.ok(inputIndex > 0 && keyboardIndex > inputIndex && recheckIndex > keyboardIndex);
+  assert.ok(recheckIndex < text.indexOf('await tap(beforeSave.save)'));
+  assert.match(text, /report\.export\.status === 'failed' \? 'native-export-unconfirmed'/);
   assert.match(text, /jsonExportMetadata\(bytes\)/);
   assert.match(text, /pngMetadata\(bytes\)/);
   assert.match(text, /storeScreenshotMetadata\(await readFile\(local\)\)/);
