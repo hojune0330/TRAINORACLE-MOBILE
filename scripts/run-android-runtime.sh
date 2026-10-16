@@ -61,7 +61,11 @@ if [[ ! -r /dev/kvm || ! -w /dev/kvm ]]; then
   sudo -n chmod 666 /dev/kvm
   KVM_CHANGED=true
 fi
-printf 'no\n' | timeout 90 "$AVDMANAGER" create avd --name "$AVD" --package "$IMAGE" --device pixel_6
+# Use a native 1080x1920 hardware profile. `wm size` alone changes logical
+# bounds but screencap can retain Pixel 6's 1080x2400 physical framebuffer.
+timeout 30 "$AVDMANAGER" list device > "$ROOT/output/android-device-profiles.log"
+grep -E '^id: [0-9]+ or "pixel_2"$' "$ROOT/output/android-device-profiles.log" >/dev/null
+printf 'no\n' | timeout 90 "$AVDMANAGER" create avd --name "$AVD" --package "$IMAGE" --device pixel_2
 # Pick an unused emulator console/ADB pair, never connect to an existing device.
 PORT=''
 for candidate in $(seq 5580 2 5680); do
