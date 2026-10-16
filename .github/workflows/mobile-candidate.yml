@@ -14,7 +14,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: mobile-candidate-${{ github.ref }}
+  group: mobile-candidate-${{ github.ref }}-${{ inputs.platforms }}
   cancel-in-progress: false
 
 jobs:
@@ -115,6 +115,8 @@ jobs:
     needs: web
     if: inputs.platforms == 'both' || inputs.platforms == 'ios'
     runs-on: macos-15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
     timeout-minutes: 35
     defaults:
       run:
