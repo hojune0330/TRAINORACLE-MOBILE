@@ -7,6 +7,11 @@ on:
         description: Explicit opt-in to UNREVIEWED health compile candidate
         required: true
         default: false
+      enable_offline_preview:
+        type: boolean
+        description: Explicit opt-in to offline readonly preview only (no account/import/API integration)
+        required: true
+        default: false
       platforms:
         type: choice
         options: [both, android, ios]
@@ -52,7 +57,12 @@ jobs:
       - name: Original wrapper gates and health helper fixtures (not device validation)
         run: npm test
       - name: Immutable pinned original and offline adapter build
-        run: node scripts/prepare-release.mjs --source ../upstream
+        env:
+          ENABLE_OFFLINE_PREVIEW: ${{ inputs.enable_offline_preview }}
+        run: |
+          args=(--source ../upstream)
+          if [ "$ENABLE_OFFLINE_PREVIEW" = 'true' ]; then args+=(--offline-health-preview); fi
+          node scripts/prepare-release.mjs "${args[@]}"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: health-web-${{ github.run_id }}
@@ -85,7 +95,13 @@ jobs:
           path: publisher/www
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: node --test scripts/configure-health.test.mjs scripts/configure-android-health.test.mjs scripts/generate-health-candidate.test.mjs
-      - run: node scripts/generate-health-candidate.mjs --enable-health --platform android
+      - name: Generate android health scaffold or explicit offline preview
+        env:
+          ENABLE_OFFLINE_PREVIEW: ${{ inputs.enable_offline_preview }}
+        run: |
+          args=(--enable-health --platform android)
+          if [ "$ENABLE_OFFLINE_PREVIEW" = 'true' ]; then args+=(--enable-offline-preview); fi
+          node scripts/generate-health-candidate.mjs "${args[@]}"
       - name: Unsigned release compile only, no device or UI launch
         run: |
           if [ ! -d "$ANDROID_HOME/platforms/android-36" ] || [ ! -d "$ANDROID_HOME/build-tools/36.0.0" ]; then sdkmanager 'platforms;android-36' 'build-tools;36.0.0'; fi
@@ -125,7 +141,13 @@ jobs:
           path: publisher/www
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: node --test scripts/configure-health.test.mjs scripts/configure-android-health.test.mjs scripts/generate-health-candidate.test.mjs
-      - run: node scripts/generate-health-candidate.mjs --enable-health --platform ios
+      - name: Generate ios health scaffold or explicit offline preview
+        env:
+          ENABLE_OFFLINE_PREVIEW: ${{ inputs.enable_offline_preview }}
+        run: |
+          args=(--enable-health --platform ios)
+          if [ "$ENABLE_OFFLINE_PREVIEW" = 'true' ]; then args+=(--enable-offline-preview); fi
+          node scripts/generate-health-candidate.mjs "${args[@]}"
       - name: Unsigned generic iOS compile only, no simulator or device launch
         run: |
           xcodebuild -version > output/health-xcode-version.txt

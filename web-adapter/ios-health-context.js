@@ -1,5 +1,7 @@
-// UNREVIEWED, not imported by bootstrap/router/auth. Never an account authenticator.
+// UNREVIEWED standalone facade. Parent owns actual offline-only preview/router wiring; never an account authenticator.
 export const IOS_HEALTH_CONSUMER_INTEGRATED = false;
+export const IOS_HEALTH_STATUS_FIELDS = Object.freeze(['available', 'enabled', 'healthScaffoldIncluded', 'healthInvocationEnabled', 'consumerMode', 'accountMode', 'blockedReason', 'healthDataRead', 'permissionRequested', 'readAuthorization', 'reviewStatus']);
+export const IOS_HEALTH_WORKOUT_FIELDS = Object.freeze(['uuid', 'start', 'end', 'durationSeconds', 'distanceMeters']);
 export function createIOSHealthContext({ native, consumerIntegrated = IOS_HEALTH_CONSUMER_INTEGRATED, isForeground = () => globalThis.document?.visibilityState === 'visible', randomId = () => globalThis.crypto.randomUUID(), timeoutMs = 30000 } = {}) {
   let epoch = 0, context = null, disposed = false;
   const pending = new Map();
@@ -16,8 +18,35 @@ export function createIOSHealthContext({ native, consumerIntegrated = IOS_HEALTH
     const method = scope === 'session' ? 'invalidateSession' : 'invalidateContext';
     await native[method]();
   }
+  // Frame-guarded capability/build status only. No beginContext, read, or permission prompt.
+  function availability() {
+    if (disposed || !isForeground() || typeof native?.availability !== 'function') return Promise.reject(error('HEALTH_STATUS_UNAVAILABLE'));
+    const mine = epoch, requestId = 'status-' + randomId();
+    return new Promise((resolve, reject) => {
+      if (pending.has(requestId)) { reject(error('DUPLICATE_REQUEST_ID')); return; }
+      const timer = setTimeout(() => { pending.delete(requestId); reject(error('HEALTH_TIMEOUT')); }, timeoutMs);
+      pending.set(requestId, { reject, timer });
+      const current = () => mine === epoch && !disposed && isForeground() && pending.has(requestId);
+      Promise.resolve().then(() => {
+        if (!current()) throw error('STALE_CONTEXT');
+        return native.availability();
+      }).then(value => {
+        const old = pending.get(requestId);
+        if (!old) return;
+        const valid = current(); clearTimeout(timer); pending.delete(requestId);
+        if (!valid) { reject(error('STALE_CONTEXT')); return; }
+        if (!value || value.healthDataRead !== false || value.permissionRequested !== false || typeof value.enabled !== 'boolean' || typeof value.available !== 'boolean' || value.readAuthorization !== 'unknown') { reject(error('INVALID_AVAILABILITY')); return; }
+        resolve(Object.freeze(Object.fromEntries(IOS_HEALTH_STATUS_FIELDS.map(key => [key, value[key]]))));
+      }, reason => {
+        const old = pending.get(requestId);
+        if (!old) return;
+        const valid = current(); clearTimeout(timer); pending.delete(requestId);
+        reject(valid ? reason : error('STALE_CONTEXT'));
+      });
+    });
+  }
   async function open() {
-    if (!consumerIntegrated || disposed || !isForeground()) throw error('CONTEXT_CONSUMER_NOT_INTEGRATED');
+    if (consumerIntegrated !== true || disposed || !isForeground()) throw error('CONTEXT_CONSUMER_NOT_INTEGRATED');
     clear('STALE_CONTEXT');
     const mine = epoch;
     const value = await native.beginContext();
@@ -27,7 +56,7 @@ export function createIOSHealthContext({ native, consumerIntegrated = IOS_HEALTH
     return { ready: true }; // Do not expose native token to account/store code.
   }
   function request(method, input = {}) {
-    if (!consumerIntegrated || disposed || !context || !isForeground()) return Promise.reject(error('HEALTH_CONTEXT_UNAVAILABLE'));
+    if (consumerIntegrated !== true || disposed || !context || !isForeground()) return Promise.reject(error('HEALTH_CONTEXT_UNAVAILABLE'));
     if (!['readRunningWorkouts', 'requestAuthorization'].includes(method)) return Promise.reject(error('INVALID_METHOD'));
     const mine = epoch, bound = context, requestId = randomId();
     if (pending.has(requestId)) return Promise.reject(error('DUPLICATE_REQUEST_ID'));
@@ -56,6 +85,6 @@ export function createIOSHealthContext({ native, consumerIntegrated = IOS_HEALTH
       });
     });
   }
-  return Object.freeze({ open, request, invalidateContext: () => invalidate('context'), invalidateSession: () => invalidate('session'),
+  return Object.freeze({ availability, open, request, invalidate: scope => invalidate(scope), invalidateContext: () => invalidate('context'), invalidateSession: () => invalidate('session'),
     background: () => invalidate('context'), dispose: async () => { disposed = true; await invalidate('session'); } });
 }

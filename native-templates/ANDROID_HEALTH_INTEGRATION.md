@@ -1,80 +1,83 @@
-# Android Health Connect 독립 후보: native review 후 fail-closed
+# Android offline-only Health Connect preview ingress
 
-상태: **기본 OFF · 건강 호출 강제 비활성화 · UNREVIEWED**
+상태: 기본 OFF / UNREVIEWED / 새 코드 Android 컴파일·기기 QA 미실행.
 
-## 현재 안전 조치와 정확한 한계
+## 경계
+기존 Capacitor NativeHealth 세 메서드는 영구 release/drop이다. 새 경로는 TrainOracleHealthPreview라는 WebViewCompat.addWebMessageListener만 사용한다. sourceOrigin=https://localhost, isMainFrame, WEB_MESSAGE_LISTENER 및 DOCUMENT_START_SCRIPT 지원을 모두 요구하며 실패 시 건강만 OFF다. legacy fallback은 없다.
 
-P1 문서/계정 세션 epoch 바인딩 및 main-frame ingress가 검증되지 않았다. 요청 시점의 document/session generation과 requestId, SPA/account 변경과 navigation/start 무효화, native ticket 발급/소비를 현재 범위에서 안전하게 연결했다고 주장하지 않는다. **이 때문에 availability·권한·읽기 세 메서드 모두 enter()에서 즉시 PluginCall.release(bridge)만 수행하고 전달된 suspend 작업을 평가하지 않는다.** 정식 SDK availability/권한/운동 조회, 네이티브 동의 UI, coroutine 시작도 이 경로에서 실행되지 않는다. 이전 permission Activity callback도 release/drop만 한다.
+공식 Capacitor 8.5.3 BridgeActivity.java/Bridge.java/PluginHandle.java/BridgeWebViewClient.java/Plugin.java 실제 소스를 조회했다. PluginHandle(Bridge, Class) 생성자가 즉시 this.load()를 호출하고 loadInstance는 setPluginHandle → setBridge → instance.load() → initializeActivityLaunchers 순서다. 즉 이 버전의 class 등록은 lazy가 아니다. BridgeActivity.onCreate → load → bridgeBuilder.create → Bridge 생성자 registerAllPlugins → PluginHandle 즉시 load → Bridge.loadWebView 순서이며, 건강 load는 최초 URL 로드보다 앞선다. Bridge는 getWebViewClient/setWebViewClient를 제공한다. 기존 client가 정확히 기본 BridgeWebViewClient일 때만 subclass를 설치하고 모든 재정의 callback에서 super를 호출한다. 다른 플러그인의 subclass는 대체하지 않고 OFF한다. 이후 client가 바뀌어도 native live 검사가 거절한다. 오류/제거 시 자신이 설치한 client일 때만 원본을 복원한다.
 
-- 문서가 바뀌었을 수 있는 call에 성공 응답뿐 아니라 오류 응답도 보내지 않는다. native top URL 일치나 JS가 보내는 epoch/boolean을 신뢰 경계로 대체하지 않는다.
-- 이 단계에서 검증된 main-frame ingress 설치가 없으므로 건강 기능은 기기/API 지원 여부와 무관하게 비활성화된다. legacy androidBridge fallback도 건강 동작을 실행하지 못한다. 다른 NativeDocuments 기능·기존 브리지는 바꾸지 않았다.
-- drop된 직접 호출의 JS Promise는 settle되지 않는다. **현재 UI는 이 API를 호출하지 말고 disabled 상태를 표시해야 한다.** 건강 availability를 통해 비활성 상태를 물어보는 것도 지원하지 않는다. 빌드/계획 metadata의 healthInvocationEnabled:false를 사용해야 한다. 늦은 오류를 새 문서에 전송해 Promise를 정리하려고 하면 안 된다.
-- account-off 설정은 네이티브 callback의 계정 안전성을 증명하지 않는다. 계정 바뀜·로그아웃·revision 보존 경계는 아직 검증되지 않았다. 데이터 전달 자체를 막은 것이지 계정 바인딩을 완성한 것이 아니다.
-- Kotlin의 기존 SDK/DTO 코드 블록은 컴파일 검토용 **도달 불가 후보**로 보존했다. enter()의 release-only gate를 바꾸는 것은 재활성화 승인이나 P1 해결이 아니다. source-contract 테스트도 해당 gate 변경을 거부한다.
+onPageStarted와 onPageCommitVisible은 epoch를 변경한다. commitObserved와 proxyReady를 분리하고 commit/documentStart 양쪽에서 공통 reconcile을 실행한다. documentStart 발신 proxy 자체는 신뢰해 등록하지 않는다. commit 후 native 랜덤 challenge를 현재 표시 문서의 document-start closure에 readiness-only evaluateJavascript로 전달하고, 그 문서가 검증된 main-frame custom 채널로 반환한 단일-use challenge에 대해서만 proxyReady를 설정한다. documentStart가 commit 뒤 도착하거나 missing-hook callback과 교차해도 다시 reconcile한다. SPA push/replace/pop/hash/pagehide는 native 및 JS context를 무효화한다. 실제 WebView callback 순서·프록시 동일성·BFCache 동작은 아직 기기 검증이 필요하다.
 
-## 변경한 파일과 기본 OFF 계약
+native UUID context token + document epoch + JS 랜덤 sessionId/contextId + requestId(최대256회 단일 사용), monotonic 90초 TTL, 원문서 JavaScriptReplyProxy를 묶는다. 동의 직후, 각 SDK suspend 직후, 최종 권한 재확인 후 및 전달 직전에 generation/foreground/native accountMode/client 소유권을 검사한다. stale/cancel/background는 새 문서에 오류도 전달하지 않는다. JS의 자체 Promise만 로컬 invalidate/timeout으로 종료한다.
 
-1. native-templates/android/NativeHealthPlugin.kt
-2. scripts/configure-android-health.mjs
-3. scripts/configure-android-health.test.mjs
-4. 본 문서
+permission UI 동안 onPause는 특별 처리하지만 onStop은 실제 background와 확실히 구분할 수 없어 보수적으로 폐기한다. 권한 승인 자체는 시스템에 남을 수 있으므로 복귀 후 open→availability로 재확인한다. 전체화면 권한 UI의 정상 응답을 보장하지 않는다. 데이터 읽기 pause는 즉시 무효화한다. permission callback은 현재 context가 살아 있고 RESUMED일 때만 권한을 재조회한다.
 
-기존 생성기, Swift, configure-health.mjs, package/lock/release 설정은 수정하지 않는다. 실제 건강 DB·계정·비밀값·서명·배포에 접근하지 않았다. 추가 web-adapter 파일도 만들지 않았다.
+## opt-in 계획
+planAndroidHealth(input,{enabled:false})가 기본이다. 기존 enabled:true는 scaffold만 추가하며 invocation은 여전히 OFF다. 실제 새 경로 opt-in은 다음을 모두 요구한다.
 
-planAndroidHealth(input, {enabled:false})는 빈 파일 계획이며 기본값도 OFF다. enabled:true는 기존 안전 게이트를 통과한 생성물 문자열에 대한 다섯 Android 파일의 **비활성 scaffold 계획**만 반환한다. 이 경우에도 healthInvocationEnabled:false 및 disabledReason: DOCUMENT_SESSION_MAIN_FRAME_BINDING_UNVERIFIED다. enabled는 scaffold opt-in이지 건강 호출 허용 플래그가 아니다. helper에는 filesystem/CLI/build 실행 부작용이 없다. 현재 generate-native에는 연결하지 않았다.
+    {enabled:true, previewEnabled:true, consumerIntegrationReviewed:true, accountMode:'off'}
 
-기존 canonical path·ancestor·symlink, source/receipt/version, INTERNET-only → backup-off/cleartext-off 변환, 새 출력 전용/기존 metadata 덮어쓰기 금지, account-off 실행환경, 자료 보존 게이트를 우회하지 않는다. 나중에 연결할 때도 기존 게이트 다음에 명시적 opt-in을 넣고 경계 검사된 writeNative만 사용해야 한다. 기존 자료를 삭제·재사용하거나 이 helper를 임의 수정 CLI로 노출하지 않는다.
+이때만 생성된 Kotlin OFFLINE_PREVIEW_ENABLED를 true로 바꾼다. 템플릿 원본은 false를 유지한다. runtime native Capacitor plugin config 역시 plugins.NativeHealth.accountMode='off'여야 한다. helper input runtimeConfig에 부모가 fresh generated android/app/src/main/assets/capacitor.config.json의 UTF-8 JSON 문자열을 전달해야 한다. previewEnabled:true일 때만 이 JSON을 검사하고 plugins.NativeHealth={accountMode:'off'}를 추가한 여섯 번째 output인 app/src/main/assets/capacitor.config.json을 반환한다. preview OFF의 scaffold 계획은 기존 다섯 파일이며 native config를 반환하지 않는다. requiredRuntimeConfig 힌트 필드는 제거했고 runtimeConfigPath가 실제 native-only 출력 경로다. root capacitor.config.json은 반환하거나 수정하지 않는다. runtime config가 없거나 다른 모드면 설치하지 않는다. JS accountMode도 off만 받는다. 실제 사용자 계정 ID를 인증으로 사용하지 않으며 source app account/login은 부모가 OFF로 유지해야 한다. account-off만으로 일반 계정 안전성이 완성됐다는 주장은 하지 않는다. 부모 consumer 연결/QA/명시 opt-in 전 실제 경로를 활성화하면 안 된다.
 
-## 공식 API 검토
+고정값 Capacitor8.5.3 / HC1.1.0 / Kotlin2.2.20 / coroutines1.10.2 / AndroidX WebKit1.14.0 / JDK21 / SDK36. 기존 generator의 source/receipt/version/path/symlink/백업차단/cleartext차단/새 출력·기록 보존 게이트를 변경하지 않는다. helper는 파일·CI를 직접 쓰지 않는 순수 계획기다. 부모가 자체 경계 검사된 writeNative로 적용해야 한다.
 
-2026-10-29 agent-reach Jina 경로로 공식 문서를 확인했다.
+## JS 공개 계약
+web-adapter/android-health-context.js의 exports:
 
-- https://developer.android.com/reference/androidx/webkit/WebViewCompat
-  - addWebMessageListener는 WEB_MESSAGE_LISTENER feature check가 필요하고 allowedOriginRules에 맞는 프레임에 메시지 객체를 주입한다. allowed origin 일치 자체는 main frame 보장이 아니다.
-- https://developer.android.com/reference/androidx/webkit/WebViewCompat.WebMessageListener
-  - onPostMessage의 sourceOrigin은 발신 프레임의 origin이고 isMainFrame은 실제 main-frame 메시지 여부다. 이 native ingress에서 두 값을 검증해야 한다. bridge.webView.url 검사만으로 대체할 수 없다.
-- Capacitor 8.5.3 PluginCall 공식 소스: https://github.com/ionic-team/capacitor/blob/8.5.3/android/capacitor/src/main/java/com/getcapacitor/PluginCall.java
-  - release(bridge)는 keepAlive 해제·native call 해제·released 표시를 수행한다. resolve/reject 없이 drop하는 용도로 사용한다.
-- https://developer.android.com/health-and-fitness/guides/health-connect/develop/get-started
-  - 정식 권한 contract, getGrantedPermissions 재확인, provider query 및 Android 13 이하 rationale Activity/Android 14 이상 보호된 permission-usage alias.
-- https://developer.android.com/jetpack/androidx/releases/health-connect
-  - 안정판 connect-client 1.1.0 고정. 가이드 예시의 alpha를 사용하지 않는다.
-- https://developer.android.com/health-and-fitness/guides/health-connect/develop/read-data
-  - 운동세션 레코드 조회·시간 범위·페이지 및 전경/별도 백그라운드 권한 구분.
+- ANDROID_HEALTH_CHANNEL='TrainOracleHealthPreview'
+- createAndroidHealthContext({window?, accountMode='off', timeoutMs=95000, randomId?})
 
-후보 고정값: Capacitor 8.5.3 / connect-client 1.1.0 / Kotlin plugin 2.2.20 / coroutines-android 1.10.2 / JDK·JVM 21 / compileSdk 36. Kotlin·coroutines 조합은 후보 고정이지 이 세션의 Android compilation 성공 증거가 아니다. AGP 8.9.1 이상 8.x의 정확한 버전만 helper가 허용하며 자동 업그레이드하지 않는다. wrapper minSdk 26 유지, Health Connect 제공자/OS 지원은 재활성화 시 별도 확인해야 한다.
+반환 facade: open(), availability(), requestAuthorization(), readRunningWorkouts({startTime,endTime,limit?}), invalidateContext(reason?), session(), background(), dispose(). session()은 실제 account ID가 아니라 offline preview 랜덤 session을 새로 만든다. 부모 UI는 SPA/화면/세션/로그아웃 변경에서 invalidateContext/session, background/dispose를 반드시 호출한다. onmessage handler를 이미 소유한 consumer가 있으면 충돌로 거절한다. Capacitor 호출 fallback·저장·서버 전송 없음.
 
-## P2 후보 코드 보완과 데이터 의미
+전송 envelope:
 
-현재는 SDK를 조회하지 않는다. 다음은 도달 불가 후보의 의미이며 실행 기능을 설명하는 것이 아니다.
+    {v:1,method,requestId,sessionId,contextId,accountMode:'off',args:{},token?,epoch?}
 
-- Samsung Health 전용 SDK가 아니라 Health Connect 경유다. 삼성 헬스 등 원본 앱이 Health Connect에 실제 공유한 운동만 대상이며 삼성 계정·시계 직접 연결이나 전체 기록을 보장하지 않는다.
-- SDK는 ExerciseSessionRecord **운동세션 객체(모든 종목)**를 조회하고 이후 running으로 필터링한다. 객체에 메모·제목 등 부가필드가 포함될 수 있으므로 “메모를 읽지 않는다” 또는 “달리기만 조회한다”는 기존 표현을 철회한다. 후보는 달리기의 허용필드만 사용·표시하고 부가필드는 **사용·저장·전송하지 않는다**. 운동 경로 전용 API/권한도 사용하지 않는다.
-- 추가 권한은 READ_EXERCISE 하나다. 기존 INTERNET은 보존하지만 후보 자체 네트워크를 사용하지 않는다. 쓰기·GPS·경로·심박·배경 읽기·과거 무제한 권한을 추가하지 않는다. 현재는 그 READ_EXERCISE도 요청하지 않는다.
-- 도달 불가 후보 범위: 최근 28일 내 최대 7일, 미래/역순 금지, 최대 100개 반환·100개씩 5페이지/500개 원본 운동. 내부 pages/scanned 카운터는 제한 계산용으로 유지하지만 scannedRecords/pagesRead를 JS 응답에서 제거했다. 원본 종목 분포 정보가 추가로 노출되지 않도록 한다.
-- raw limit은 키가 없을 때만 50이다. 실제 Number, finite, 정수, 1..100을 요구한다. null/string/boolean/1.5/배열/객체/범위 밖을 거절하며 getInt/coercion/default fallback은 제거했다. JS parseAndroidHealthLimit은 실행 가능한 **스키마 참조**이며 native 보안 ingress나 Kotlin runtime 시험 대체물이 아니다.
-- 후보의 마지막 read suspend 직후 및 resolve 직전 전경 검사를 추가하고 CancellationException은 release 후 별도 rethrow한다. 하지만 document/session epoch 검사가 아직 없으므로 이 개선을 충분한 lifecycle/계정 안전성이라고 주장하지 않는다. 실제 실행 경로는 모두 차단되어 read suspend/권한 UI pause/데이터읽기 pause 자체가 발생하지 않는다.
-- 허용 DTO 후보: provider=health-connect, sourcePackage, sourceRecordId, startTime, endTime, exerciseType=running, reviewStatus=UNREVIEWED. outer 응답은 sessions/bounded만; query-count telemetry 제외. 기존 파일 import로 재포장하거나 Samsung 이름으로 전체 결과 재라벨링하지 않는다. 사용자 수동 검토 전 자동 계정 ingest·영구 저장·업로드 API는 없다.
-- bounded/빈 결과는 완전한 이력이나 기록 부재·권한 거절의 증거가 아니다. treadmill 등 다른 운동 타입은 이 후보의 running 필터 밖이다.
+open에는 token/epoch가 없으며 응답 result={status:'open',token,epoch,provider:'health-connect',reviewStatus:'UNREVIEWED'}다. 이후 요청은 native가 발급한 token/epoch를 반드시 넣는다. 응답 envelope={v:1,requestId,sessionId,contextId,epoch,ok,result? ,error?}. availability result={status:'available'|'provider-update-required'|'unavailable',readExerciseGranted,provider,reviewStatus}. requestAuthorization result={status:'granted'|'denied',provider,reviewStatus}. read result={sessions:[DTO],bounded,provider,reviewStatus}. error는 건강정보 없는 고정 코드다.
 
-## 재활성화 전 필수 P1 설계·검증
+DTO={provider:'health-connect',sourcePackage,sourceRecordId,startTime,endTime,exerciseType:'running',reviewStatus:'UNREVIEWED'}. query-count telemetry 없음. 운동세션 객체는 전체 종목을 조회한 후 running 필터링하므로 메모가 SDK 객체에 없다고 주장하지 않는다. 부가필드는 사용·저장·전송하지 않는다. READ_EXERCISE만, GPS/경로 API·쓰기·백그라운드/무제한 과거 권한 없음. 최근28일 내 최대7일, 최대100건/500원본/5페이지. limit은 키 부재에만50, raw finite integer1..100만 허용한다. 삼성 헬스 등 원본 앱이 실제 공유한 활동만 보이며 시계 직접연동/모든 이력 보장이 아니다. 기존 기록 mutation/계정 ingest/영구저장/건강 DB 직접검증은 하지 않았다.
 
-[blocked] native generation + requestId + document/session context binding, navigation/start/same-origin reload/SPA/account logout 변경 무효화를 기존 WebView/앱 수명주기에 정확히 연결해야 한다. JS가 보내는 context 값만 믿으면 안 된다.
+## 검증과 차단조건
+새 JS 합성/계획기 테스트는 통과했지만 Kotlin 실행·Android 컴파일·실제 권한 UI·프레임/동일 origin reload·SPA/세션/background/BFCache 검증이 아니다. 원래 generate-native.test.mjs는 이 작업 폴더의 node_modules/@capacitor/cli/assets/android-template.tar.gz 부재로 실행 차단됐다. 부모의 최신 commit에서 의존성 복원 후 원래 generator test와 compileDebugKotlin/processDebugMainManifest/assembleDebug를 다시 실행해야 한다. 이전 a58dad CI 성공은 새 코드의 성공 증거가 아니다. 실제 건강 DB/서명/스토어/CI 구성은 수정·접근하지 않았다.
 
-[blocked] WebViewCompat.addWebMessageListener 설치와 feature 확인, sourceOrigin exact allowlist 및 isMainFrame 검증을 통과한 ingress에서만 일회 ticket 발급. ticket은 native에서 generation/context/request/method/expiry에 묶고 한 번만 소비해야 한다. 설치 실패·지원 불가·iframe·legacy fallback·재생/replay는 건강만 비활성/차단해야 한다. native topURL 체크는 방어 보조일 뿐 발신 프레임 검증 대체물이 아니다.
+공식 근거:
+https://github.com/ionic-team/capacitor/blob/8.5.3/android/capacitor/src/main/java/com/getcapacitor/Bridge.java
+https://github.com/ionic-team/capacitor/blob/8.5.3/android/capacitor/src/main/java/com/getcapacitor/BridgeWebViewClient.java
+https://developer.android.com/reference/androidx/webkit/WebViewCompat
+https://developer.android.com/reference/androidx/webkit/WebViewCompat.WebMessageListener
+https://developer.android.com/health-and-fitness/guides/health-connect/develop/get-started
 
-[blocked] 동의 직후, 모든 suspend 직후, 각 SDK 페이지, resolve 직전에 context/foreground/권한 재검증. stale/cancelled는 새 문서에 reject도 보내지 말고 release/drop. permission UI의 정상 pause와 데이터읽기 중 pause를 구분하고, 마지막 페이지 뒤 background된 경우도 전달하지 않아야 한다. 이를 구현·실기기 검증하기 전 release-only gate를 제거하지 않는다.
+## 후속 startup/config 보완 (부모 통합 계약)
 
-## 검증 수준과 부모 CI 재실행
+확인된 MainActivity hook은 기존 onCreate 내부에서 다음 순서다. 이 코드는 helper가 반환하는 native MainActivity 내용이며 부모 generator 자체는 이 작업에서 수정하지 않았다.
 
-로컬 실행:
+    registerPlugin(NativeDocumentsPlugin.class);
+    registerPlugin(NativeHealthPlugin.class);
+    super.onCreate(savedInstanceState);
 
-    node --check scripts/configure-android-health.mjs
-    node --check scripts/configure-android-health.test.mjs
-    node --test scripts/configure-android-health.test.mjs
+8.5.3에서는 등록된 class의 PluginHandle 생성 시 eager load가 수행되므로 별도 bridge.getPlugin(...).load() 호출은 필요 없고 추가하지 않았다. super.onCreate 이후 강제 로드는 document-start 설치 보장이 없으므로 대안이 아니다. helper는 중복/늦은 documents 등록과 MainActivity load override를 거절한다. native load는 main-thread, Activity < STARTED, WebView URL null/about:blank 조건을 추가 검사하고 late/manual load면 건강만 OFF다. loadAttempted guard로 재설치도 차단한다. startupStrategy는 capacitor-8.5.3-eager-pluginhandle-before-loadWebView, startupRuntimeVerified는 false다. **소스 순서를 확인한 것이며 실제 첫 화면에 채널이 존재한다는 UI/기기 검증은 아직 하지 않았다.**
 
-16개 통과: 순수 planner fixture, JSON schema 참조 실행, Kotlin gate/parser/DTO 소스 계약 정적 검사. Kotlin 실행·Android 컴파일·WebView iframe/navigation/session/lifecycle 검증이 아니다. 이전 12개 테스트 결과나 다른 commit의 CI 결과를 이번 변경의 성공 증거로 재사용하면 안 된다.
+preview input runtimeConfig는 JSON 문자열만 받는다. appId=io.trainoracle.app, appName=TrainOracle, webDir=www, loggingBehavior=none, localhost HTTPS/cleartext=false, allowMixedContent=false, account-off 및 기존 health plugin 설정 부재를 검사한다. server.url·allowNavigation·대체 platform path·안전하지 않은 back handler 설정도 거절한다. 기존 다른 plugin/config 값은 보존하고 입력 문자열은 불변이다. CLI8.5.3 copyCapacitorConfig는 buildOptions만 제거하고 extConfig를 native capacitor.config.json으로 직렬화하므로 이 native JSON은 identity/webDir 등 필드를 보유하는 경로임을 소스로 확인했다.
 
-[blocked] 이 세션은 실제 Android compile을 실행하지 않았다. 부모의 generated compiler CI branch는 **이 네 파일의 새 commit**으로 재생성하고 compileDebugKotlin/processDebugMainManifest/assembleDebug를 재실행해야 한다. JDK 21, SDK 36, 검토된 AGP/Gradle 및 고정 의존성 해결과 기존 source/receipt/자료 보존 게이트가 필요하다. 컴파일 성공도 건강 기능 동작·P1 해결·UI 승인 성공을 의미하지 않는다.
+부모는 exact output allowlist에 preview ON일 때만 app/src/main/assets/capacitor.config.json을 추가하고, 기존 safe path/receipt/불변 root config/새 output·기록보존 게이트를 유지해야 한다. root immutable config는 절대 수정하지 않는다. 옵션 이름은 previewEnabled/consumerIntegrationReviewed 그대로이며 consumerIntegrated 같은 별도 옵션은 받지 않는다.
 
-[blocked] 실기기/계정/UI·Play Console 접근 선언/건강 앱 정책·개인정보 처리방침·문의/보관/삭제·서명/스토어 승인은 별도다. 현재 disabled 상태와 실제 사용 불가를 사용자에게 정확히 표시해야 한다.
+후속 검증: 계획기14개 + 합성 JS7개 = 21개 통과. Kotlin 컴파일/기기 startup은 미실행이며 부모의 새 commit CI 및 최초 문서/ActivityResult 등록 시점 기기 QA가 필요하다. 실제 SDK 조회·건강 DB·서명·스토어 접근 없음.
+
+추가 공식 근거:
+https://github.com/ionic-team/capacitor/blob/8.5.3/android/capacitor/src/main/java/com/getcapacitor/BridgeActivity.java
+https://github.com/ionic-team/capacitor/blob/8.5.3/android/capacitor/src/main/java/com/getcapacitor/PluginHandle.java
+https://github.com/ionic-team/capacitor/blob/8.5.3/cli/src/tasks/copy.ts
+
+## 후속 P2: callback 순서·권한 RESUMED 지연
+
+문서 준비는 commitObserved / proxyReady / navigationEpoch / 단일 사용 probeChallenge로 분리했다. 이전 문서의 지연 documentStart는 현재 표시 문서의 준비 probe를 깨울 수만 있으며 그 발신 proxy를 등록하지 않는다. navigation은 challenge와 proxy를 폐기하며, 이전 challenge·중복 documentReady/init 재생은 proxy를 바꾸지 못한다. 현재 문서 challenge TTL은 5초이며 준비 전용 evaluateJavascript에 건강 데이터·계정 ID·승인 결과를 싣지 않는다. 실제 응답은 계속 원문서 JavaScriptReplyProxy만 사용한다. callback 순서를 보장한다고 가정하지 않는다. feature/closure/현재 문서 확인 실패는 건강 경로만 준비되지 않은 상태로 남는다.
+
+권한 launch 시 permissionFlightRequest에 원래 Request를 저장한다. result는 그 객체의 pending 소유권·epoch·TTL을 확인하고 permissionResultRequest에 보관한다. STARTED에서 도착하면 즉시 결과를 폐기하지 않고 LifecycleEventObserver의 ON_RESUME에서 재시도한다. handleOnResume이 RESUMED보다 먼저 호출돼도 observer가 별도로 재시도한다. 새 요청에 이전 결과를 연결하지 않는다. 실제 onStop은 기존과 같이 context/result를 폐기하며 원래 flight는 callback을 안전하게 식별할 tombstone으로만 남긴다. 새 권한 launch는 이전 flight가 끝나기 전 거절하고, 오래된 flight가 새 데이터 읽기의 pause를 면제하지 않는다. observer는 disable/설치 실패/destroy에서 removeObserver로 정리한다.
+
+회귀: 수정 전 새 소스 계약 2개가 실패(red)한 것을 확인한 뒤 수정 후 통과했다. 순서 역전·missing-hook callback 교차·오래된 문서 challenge/init replay·STARTED 결과→ON_RESUME·stop 후 새 요청 귀속 방지의 합성 reference state 검사를 추가했다. 템플릿에서 추출한 document-start JavaScript도 Node VM에서 합성 실행한다. reference-state/소스 계약/Node VM은 Kotlin·실제 Android WebView callback을 실행한 것이 아니며 네이티브 컴파일 성공으로 해석하면 안 된다. 부모의 최신 commit Android compile/기기 QA를 별도로 재실행해야 한다. 공개 facade와 runtimeConfig/부모 generator 계약은 변경하지 않았다.
+
+공식 근거 추가:
+https://developer.android.com/reference/androidx/lifecycle/LifecycleEventObserver
+https://developer.android.com/reference/android/webkit/WebView#evaluateJavascript(java.lang.String,android.webkit.ValueCallback)
+공식 WebView 문서는 evaluateJavascript가 현재 표시 문서에서 비동기로 실행되고 UI thread callback을 사용한다고 설명한다. 이 API는 준비 challenge 전용이며 건강 응답 전달 경로가 아니다.

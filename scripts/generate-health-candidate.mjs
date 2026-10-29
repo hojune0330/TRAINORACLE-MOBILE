@@ -23,18 +23,31 @@ async function tree(p, prefix = '') {
   return out;
 }
 export function parseArgs(args) {
-  if (args.length !== 3 || args.filter(x => x === '--enable-health').length !== 1) throw Error('Usage: --enable-health --platform android|ios');
-  const a = args.filter(x => x !== '--enable-health');
+  const enableOfflinePreview = args.includes('--enable-offline-preview');
+  if (args.length !== (enableOfflinePreview ? 4 : 3) || args.filter(x => x === '--enable-health').length !== 1 || args.filter(x => x === '--enable-offline-preview').length > 1) throw Error('Usage: --enable-health --platform android|ios [--enable-offline-preview]');
+  const a = args.filter(x => x !== '--enable-health' && x !== '--enable-offline-preview');
   if (a[0] !== '--platform' || !['android', 'ios'].includes(a[1])) throw Error('Explicit --platform required');
-  return { platform: a[1], enableHealth: true };
+  return { platform: a[1], enableHealth: true, enableOfflinePreview };
 }
 export function parseAgpVersion(text) {
   const all = [...text.matchAll(/classpath\s+['"]com\.android\.tools\.build:gradle:([^'"]+)['"]/g)];
   if (all.length !== 1 || !/^8\.\d+\.\d+$/.test(all[0][1])) throw Error('Actual pinned AGP classpath required');
   return all[0][1];
 }
-export async function generateHealthCandidate({ platform, enableHealth = false, wrapperRoot = WRAPPER_ROOT }, deps = {}) {
+// This config must already be included in the immutable web receipt, never patched here.
+async function verifyOfflinePreview(root, enableOfflinePreview) {
+  const configPath = join(root, 'www/native/health-preview-config.json');
+  // Legacy scaffold-only bundles may omit this config. Any present config must
+  // be receipted, source-bound and agree with the native opt-in in BOTH directions.
+  if (!enableOfflinePreview && !(await exists(configPath))) return;
+  await verifyOutput(join(root, 'www'), SOURCE_SHA);
+  const config = await json(configPath);
+  const expected = { schemaVersion: 1, enabled: enableOfflinePreview, accountMode: 'off', sourceSha: SOURCE_SHA, consumerContract: 'OFFLINE_NATIVE_HEALTH_PREVIEW_V1' };
+  if (!config || Array.isArray(config) || typeof config !== 'object' || Object.keys(config).sort().join('|') !== Object.keys(expected).sort().join('|') || Object.entries(expected).some(([key, value]) => config[key] !== value)) throw Error('Offline preview config mismatch');
+}
+export async function generateHealthCandidate({ platform, enableHealth = false, enableOfflinePreview = false, wrapperRoot = WRAPPER_ROOT }, deps = {}) {
   if (enableHealth !== true || !['android', 'ios'].includes(platform)) throw Error('Explicit health opt-in/platform required');
+  if (typeof enableOfflinePreview !== 'boolean') throw Error('Offline preview opt-in must be an explicit boolean');
   const root = resolve(wrapperRoot), native = join(root, platform), output = join(root, 'output');
   await ancestors(root);
   if (await realpath(root) !== root) throw Error('Noncanonical root');
@@ -52,6 +65,7 @@ export async function generateHealthCandidate({ platform, enableHealth = false, 
   const release = await json(join(root, 'release-config.json')), cap = await json(join(root, 'capacitor.config.json'));
   validateConfiguration(release, cap);
   if (release.accountMode !== 'off' || release.signingConfigured !== false || release.storeUploadEnabled !== false) throw Error('Offline unsigned candidate only');
+  await verifyOfflinePreview(root, enableOfflinePreview);
   // CLI always delegates all original receipt/dependency/offline gates to the real generator.
   // Injection is solely for local fixtures, like generateNative's command injection.
   const base = await (deps.generateNative ?? generateNative)({ platform, wrapperRoot: root }, deps.nativeDependencies);
@@ -68,14 +82,16 @@ export async function generateHealthCandidate({ platform, enableHealth = false, 
   if (platform === 'android') {
     const rootGradle = await read('build.gradle'); agpVersion = parseAgpVersion(rootGradle);
     const java = 'app/src/main/java/' + release.appId.replaceAll('.', '/');
-    const plan = planAndroidHealth({ appId: release.appId, capacitorVersion: VERSIONS['@capacitor/android'], compileSdk: release.androidCompileSdk, agpVersion, rootGradle, appGradle: await read('app/build.gradle'), manifest: await read('app/src/main/AndroidManifest.xml'), mainActivity: await read(java + '/MainActivity.java'), kotlinTemplate: await readFile(join(root, template), 'utf8') }, { enabled: true });
+    const plan = planAndroidHealth({ appId: release.appId, capacitorVersion: VERSIONS['@capacitor/android'], compileSdk: release.androidCompileSdk, agpVersion, rootGradle, appGradle: await read('app/build.gradle'), manifest: await read('app/src/main/AndroidManifest.xml'), mainActivity: await read(java + '/MainActivity.java'), kotlinTemplate: await readFile(join(root, template), 'utf8'), runtimeConfig: enableOfflinePreview ? await read('app/src/main/assets/capacitor.config.json') : undefined }, { enabled: true, previewEnabled: enableOfflinePreview, consumerIntegrationReviewed: enableOfflinePreview, accountMode: 'off' });
+    if (plan.healthInvocationEnabled !== enableOfflinePreview) throw Error('Android helper invocation/config mismatch');
     files = plan.files;
-    const expected = ['build.gradle', 'app/build.gradle', 'app/src/main/AndroidManifest.xml', java + '/MainActivity.java', java + '/NativeHealthPlugin.kt'];
+    const expected = ['build.gradle', 'app/build.gradle', 'app/src/main/AndroidManifest.xml', java + '/MainActivity.java', java + '/NativeHealthPlugin.kt', ...(enableOfflinePreview ? ['app/src/main/assets/capacitor.config.json'] : [])];
     if (!plan.enabled || Object.keys(files).sort().join('|') !== expected.sort().join('|') || Object.hasOwn(baseline, java + '/NativeHealthPlugin.kt')) throw Error('Unexpected Android plan');
   } else {
     const require = createRequire(join(root, 'package.json'));
     const plist = deps.plist ?? require('plist');
-    const plan = createHealthPlan({ enabled: true, info: plist.parse(await read('App/App/Info.plist')), bridgeSource: await read('App/App/NativeBridgeViewController.swift') });
+    const plan = createHealthPlan({ enabled: true, consumerIntegrated: enableOfflinePreview, accountMode: 'off', info: plist.parse(await read('App/App/Info.plist')), bridgeSource: await read('App/App/NativeBridgeViewController.swift') });
+    if (plan.healthInvocationEnabled !== enableOfflinePreview) throw Error('iOS helper invocation/config mismatch');
     const ent = 'App/' + HEALTH_ENTITLEMENTS_PATH, source = 'App/App/' + HEALTH_SOURCE;
     if (Object.keys(baseline).some(p => p.endsWith('.entitlements')) || Object.hasOwn(baseline, source)) throw Error('Preexisting health source/entitlements rejected');
     const projectPath = join(native, 'App/App.xcodeproj/project.pbxproj');
@@ -104,7 +120,7 @@ export async function generateHealthCandidate({ platform, enableHealth = false, 
   await unchanged(); await verifyOutput(join(root, 'www'), SOURCE_SHA);
   await ancestors(output);
   if (JSON.stringify(await tree(output)) !== JSON.stringify(baseOutput) || hash(await readFile(basePath)) !== baseHash) throw Error('Base metadata/output changed');
-  const metadata = { schemaVersion: 1, platform, reviewStatus: 'UNREVIEWED', healthScaffoldIncluded: true, healthInvocationEnabled: false, disabledReason: 'CONTEXT_CONSUMER_NOT_REVIEWED', sourceSha: SOURCE_SHA, webReceiptSha256: receiptHash, baseGenerationSha256: baseHash, nativeCompilation: 'not-executed', runtimeValidation: 'not-executed', deviceValidation: 'not-executed', signingConfigured: false, storeUploadEnabled: false, accountMode: 'off', ...(agpVersion ? { agpVersion } : {}), modifiedFiles: Object.keys(files).sort(), nativeFilesSha256: final };
+  const metadata = { schemaVersion: 1, platform, reviewStatus: 'UNREVIEWED', healthScaffoldIncluded: true, healthInvocationEnabled: enableOfflinePreview, ...(enableOfflinePreview ? { healthInvocationScope: 'OFFLINE_READONLY_PREVIEW_ONLY' } : { disabledReason: 'CONTEXT_CONSUMER_NOT_REVIEWED' }), sourceSha: SOURCE_SHA, webReceiptSha256: receiptHash, baseGenerationSha256: baseHash, nativeCompilation: 'not-executed', runtimeValidation: 'not-executed', deviceValidation: 'not-executed', signingConfigured: false, storeUploadEnabled: false, accountMode: 'off', ...(agpVersion ? { agpVersion } : {}), modifiedFiles: Object.keys(files).sort(), nativeFilesSha256: final };
   await writeFile(metaPath, JSON.stringify(metadata, null, 2) + '\n', { flag: 'wx' });
   return metadata;
 }

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { createHealthPlan, transformHealthBridge, configureHealthXcode, validateHealthQuery, HEALTH_SOURCE } from './configure-health.mjs';
+import { createHealthPlan, transformHealthBridge, configureHealthXcode, validateHealthQuery, HEALTH_SOURCE, HEALTH_CONSUMER_PLIST_KEYS } from './configure-health.mjs';
 const bridge = 'override func capacitorDidLoad() {\n bridge?.registerPluginInstance(NativeDocumentsPlugin())\n}';
 const fixture = () => ({ hash: { project: { objects: {
  PBXNativeTarget: { T: { name: 'App', buildConfigurationList: 'L', buildPhases: [{ value: 'S' }] } },
@@ -35,3 +35,13 @@ test('Swift source privacy invariants, NOT native compile', async () => {
  for (const forbidden of ['HKWorkoutRouteQuery', 'workout.metadata', 'sourceRevision', 'store.save(', 'UserDefaults', 'FileManager', 'authorizationStatus(for:']) assert.ok(!s.includes(forbidden), forbidden);
  const load = s.slice(s.indexOf('public override func load()'), s.indexOf('fileprivate func trusted')); assert.ok(!load.includes('requestAuthorization(')); assert.ok(!load.includes('store.execute('));
 });
+
+test('OFF and scaffold-only metadata stay invocation-disabled without plist flags', () => {
+ for (const enabled of [false, true]) { const p = createHealthPlan({ enabled, bridgeSource: bridge }); assert.equal(p.healthScaffoldIncluded, enabled); assert.equal(p.healthInvocationEnabled, false); assert.equal(p.consumerIntegrationReviewed, false); assert.equal(p.consumerMode, null); for (const k of Object.values(HEALTH_CONSUMER_PLIST_KEYS)) assert.equal(Object.hasOwn(p.info, k), false); }
+});
+test('explicit offline consumer emits both exact plist keys', () => {
+ const input = { enabled: true, consumerIntegrated: true, accountMode: 'off', bridgeSource: bridge, info: {} }; const before = structuredClone(input); const p = createHealthPlan(input); assert.deepEqual(input, before); assert.equal(p.healthInvocationEnabled, true); assert.equal(p.consumerMode, 'offline-preview'); assert.equal(p.accountMode, 'off'); assert.equal(p.info[HEALTH_CONSUMER_PLIST_KEYS.integrated], true); assert.equal(p.info[HEALTH_CONSUMER_PLIST_KEYS.accountMode], 'off');
+});
+test('consumer opt-in rejects absent/account-enabled/scaffold-OFF combinations', () => { for (const options of [{ enabled: true }, { enabled: true, accountMode: 'on' }, { enabled: false, accountMode: 'off' }, { enabled: true, accountMode: false }]) assert.throws(() => createHealthPlan({ ...options, consumerIntegrated: true, bridgeSource: bridge })); });
+test('consumer opt-in rejects truthy nonbooleans', () => { for (const consumerIntegrated of ['true', 1, null]) assert.throws(() => createHealthPlan({ enabled: true, consumerIntegrated, accountMode: 'off', bridgeSource: bridge })); });
+test('preexisting consumer flags cannot silently enable scaffold', () => { for (const k of Object.values(HEALTH_CONSUMER_PLIST_KEYS)) assert.throws(() => createHealthPlan({ enabled: true, bridgeSource: bridge, info: { [k]: true } })); });

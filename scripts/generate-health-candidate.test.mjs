@@ -11,11 +11,12 @@ const hash = b => createHash('sha256').update(b).digest('hex');
 const put = async (r, f, data) => { await mkdir(dirname(join(r, f)), { recursive: true }); await writeFile(join(r, f), data); };
 const release = JSON.parse(await readFile(join(WRAPPER_ROOT, 'release-config.json'), 'utf8'));
 const cap = JSON.parse(await readFile(join(WRAPPER_ROOT, 'capacitor.config.json'), 'utf8'));
-async function fixture(t, platform = 'android') {
+async function fixture(t, platform = 'android', previewConfig) {
   const root = await mkdtemp(join(tmpdir(), 'health-candidate-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   for (const [f, obj] of Object.entries({ 'release-config.json': release, 'capacitor.config.json': cap, 'package.json': {}, 'package-lock.json': {} })) await put(root, f, JSON.stringify(obj));
   await put(root, 'www/index.html', '<html><head></head><body>fixture</body></html>');
+  if (previewConfig !== undefined) await put(root, 'www/native/health-preview-config.json', typeof previewConfig === 'string' ? previewConfig : JSON.stringify(previewConfig));
   const entries = {}, snapshot = { treeSha256: hash(JSON.stringify(entries)), entries };
   await prepareOutput(join(root, 'www'), { sourceSha: SOURCE_SHA, sourceBefore: snapshot, sourceAfter: snapshot });
   await put(root, 'native-templates/' + platform + '/NativeHealthPlugin.' + (platform === 'ios' ? 'swift' : 'kt'), platform === 'ios' ? '// UNREVIEWED Swift fixture' : await readFile(join(WRAPPER_ROOT, 'native-templates/android/NativeHealthPlugin.kt'), 'utf8'));
@@ -27,9 +28,11 @@ function runner(root, platform = 'android', mutate = async () => {}) {
     if (platform === 'android') {
       const java = 'android/app/src/main/java/io/trainoracle/app/';
       await put(root, 'android/build.gradle', "buildscript { dependencies { classpath 'com.android.tools.build:gradle:8.13.0' } }");
+      await put(root, 'android/app/src/main/assets/capacitor.config.json', JSON.stringify(cap));
       await put(root, 'android/app/build.gradle', "apply plugin: 'com.android.application'\ndependencies {\n}\n");
       await put(root, 'android/app/src/main/AndroidManifest.xml', '<manifest><uses-permission android:name="android.permission.INTERNET"/><application android:allowBackup="false" android:fullBackupContent="false" android:dataExtractionRules="@xml/data_extraction_rules" android:usesCleartextTraffic="false"></application></manifest>');
-      await put(root, java + 'MainActivity.java', 'package io.trainoracle.app;\nregisterPlugin(NativeDocumentsPlugin.class);');
+      await put(root, 'android/app/src/main/assets/capacitor.config.json', JSON.stringify(cap));
+      await put(root, java + 'MainActivity.java', 'package io.trainoracle.app;\nimport com.getcapacitor.BridgeActivity;\nimport android.os.Bundle;\npublic class MainActivity extends BridgeActivity {\n@Override public void onCreate(Bundle savedInstanceState) {\nregisterPlugin(NativeDocumentsPlugin.class);\nsuper.onCreate(savedInstanceState);\n}\n}');
     } else {
       await put(root, 'ios/App/App/Info.plist', JSON.stringify({ MinimumOSVersion: '16.0' }));
       await put(root, 'ios/App/App/NativeBridgeViewController.swift', 'override func capacitorDidLoad() {\nbridge?.registerPluginInstance(NativeDocumentsPlugin())\n}');
@@ -43,7 +46,7 @@ function runner(root, platform = 'android', mutate = async () => {}) {
 }
 const opts = (root, platform = 'android') => ({ wrapperRoot: root, platform, enableHealth: true });
 test('strict CLI explicit opt-in, no arbitrary output/root options', () => {
-  assert.deepEqual(parseArgs(['--enable-health', '--platform', 'ios']), { enableHealth: true, platform: 'ios' });
+  assert.deepEqual(parseArgs(['--enable-health', '--platform', 'ios']), { enableHealth: true, platform: 'ios', enableOfflinePreview: false });
   for (const a of [[], ['--platform', 'android'], ['--enable-health'], ['--enable-health', '--platform', 'web'], ['--enable-health', '--platform', 'ios', '--output', 'x']]) assert.throws(() => parseArgs(a));
 });
 test('actual literal AGP parsed, ambiguity and substitution rejected', () => {
@@ -147,6 +150,7 @@ test('integration delegates to REAL generateNative before Android health transfo
     calls.push(args[1]); assert.equal(command, process.execPath); assert.equal(options.env.VITE_KILL_ACCOUNT, 'true'); assert.equal(options.cwd, root);
     if (args[1] === 'add') {
       await put(root, 'android/build.gradle', "buildscript { dependencies { classpath 'com.android.tools.build:gradle:8.13.0' } }");
+      await put(root, 'android/app/src/main/assets/capacitor.config.json', JSON.stringify(cap));
       await put(root, 'android/app/build.gradle', 'apply plugin: \'com.android.application\'\nandroid { defaultConfig { applicationId "io.trainoracle.app"\nversionCode 1\nversionName "1.0" } buildTypes { release {} } }\ndependencies {\n}\n');
       await put(root, 'android/variables.gradle', 'minSdkVersion = 24\ncompileSdkVersion = 35\ntargetSdkVersion = 35\n');
       await put(root, 'android/app/src/main/AndroidManifest.xml', '<manifest><uses-permission android:name="android.permission.INTERNET"/><application></application></manifest>');
@@ -160,4 +164,111 @@ test('integration delegates to REAL generateNative before Android health transfo
   const original = JSON.parse(await readFile(join(root, 'output/native-generation-android.json'), 'utf8'));
   assert.equal(original.signingConfigured, false); assert.equal(original.nativeCompilation, 'not-executed');
   assert.match(await readFile(join(root, 'android/app/src/main/AndroidManifest.xml'), 'utf8'), /android:allowBackup="false"/);
+});
+
+const previewConfig = () => ({ schemaVersion: 1, enabled: true, accountMode: 'off', sourceSha: SOURCE_SHA, consumerContract: 'OFFLINE_NATIVE_HEALTH_PREVIEW_V1' });
+test('offline preview CLI is separate, explicit and strictly parsed', () => {
+  for (const p of ['ios', 'android']) for (const args of [
+    ['--enable-health', '--platform', p, '--enable-offline-preview'],
+    ['--enable-offline-preview', '--enable-health', '--platform', p]
+  ]) assert.deepEqual(parseArgs(args), { enableHealth: true, platform: p, enableOfflinePreview: true });
+  for (const args of [
+    ['--enable-offline-preview', '--platform', 'ios'],
+    ['--enable-health', '--platform', 'ios', '--enable-offline-preview', '--enable-offline-preview'],
+    ['--enable-health', '--platform', 'ios', '--enable-offline-preview=true'],
+    ['--enable-health', '--platform', 'ios', '--enable-offline-preview', '--root', '/tmp']
+  ]) assert.throws(() => parseArgs(args));
+});
+for (const value of ['true', 1, null]) test('nonboolean preview flag rejected: ' + value, async t => {
+  const root = await fixture(t);
+  await assert.rejects(generateHealthCandidate({ ...opts(root), enableOfflinePreview: value }, { generateNative: () => assert.fail('must not run') }), /explicit boolean/);
+});
+for (const [label, config] of [
+  ['missing', undefined], ['malformed', '{broken'], ['null', 'null'], ['array', '[]'],
+  ['unknown key', { ...previewConfig(), unexpected: true }],
+  ['missing key', { schemaVersion: 1, enabled: true, accountMode: 'off', sourceSha: SOURCE_SHA }],
+  ['wrong source', { ...previewConfig(), sourceSha: '0'.repeat(40) }],
+  ['account on', { ...previewConfig(), accountMode: 'on' }],
+  ['flag/config mismatch', { ...previewConfig(), enabled: false }],
+  ['schema type', { ...previewConfig(), schemaVersion: '1' }],
+  ['enabled type', { ...previewConfig(), enabled: 'true' }],
+  ['wrong contract', { ...previewConfig(), consumerContract: 'OTHER' }]
+]) test('explicit offline preview rejects config: ' + label, async t => {
+  const root = await fixture(t, 'ios', config); let ran = false;
+  await assert.rejects(generateHealthCandidate({ ...opts(root, 'ios'), enableOfflinePreview: true }, { generateNative: () => { ran = true; throw Error('must not run'); } }));
+  assert.equal(ran, false);
+});
+for (const platform of ['ios', 'android']) for (const explicitFalse of [false, true]) test('enabled web config with native preview OFF rejects before generation: ' + platform + '/explicitFalse=' + explicitFalse, async t => {
+  const root = await fixture(t, platform, previewConfig()); let ran = false;
+  const options = { ...opts(root, platform), ...(explicitFalse ? { enableOfflinePreview: false } : {}) };
+  await assert.rejects(generateHealthCandidate(options, { generateNative: () => { ran = true; throw Error('must not run'); } }), /Offline preview config mismatch/);
+  assert.equal(ran, false);
+  await assert.rejects(readFile(join(root, 'output/native-health-candidate-' + platform + '.json')), { code: 'ENOENT' });
+});
+test('explicit false preview option preserves default scaffold without config', async t => {
+  const root = await fixture(t);
+  const result = await generateHealthCandidate({ ...opts(root), enableOfflinePreview: false }, { generateNative: runner(root) });
+  assert.equal(result.healthScaffoldIncluded, true); assert.equal(result.healthInvocationEnabled, false); assert.equal(result.healthInvocationScope, undefined);
+});
+for (const platform of ['ios', 'android']) test('explicit preview plus receipted exact config enables only readonly scope: ' + platform, async t => {
+  const root = await fixture(t, platform, previewConfig());
+  const receiptBefore = await readFile(join(root, 'www', RECEIPT_FILE));
+  const configBefore = await readFile(join(root, 'www/native/health-preview-config.json'));
+  const result = await generateHealthCandidate({ ...opts(root, platform), enableOfflinePreview: true }, { generateNative: runner(root, platform), plist: { parse: JSON.parse, build: JSON.stringify }, loadProject: () => projectFixture() });
+  assert.equal(result.healthScaffoldIncluded, true); assert.equal(result.healthInvocationEnabled, true);
+  assert.equal(result.healthInvocationScope, 'OFFLINE_READONLY_PREVIEW_ONLY'); assert.equal(result.disabledReason, undefined);
+  assert.equal(result.accountMode, 'off'); assert.equal(result.nativeCompilation, 'not-executed'); assert.equal(result.runtimeValidation, 'not-executed'); assert.equal(result.deviceValidation, 'not-executed');
+  assert.deepEqual(await readFile(join(root, 'www', RECEIPT_FILE)), receiptBefore);
+  assert.deepEqual(await readFile(join(root, 'www/native/health-preview-config.json')), configBefore);
+  const persisted = JSON.parse(await readFile(join(root, 'output/native-health-candidate-' + platform + '.json'), 'utf8'));
+  assert.deepEqual(persisted, result);
+  if (platform === 'ios') {
+    const info = JSON.parse(await readFile(join(root, 'ios/App/App/Info.plist'), 'utf8'));
+    assert.equal(info.TrainOracleHealthOfflineConsumerIntegrated, true); assert.equal(info.TrainOracleAccountMode, 'off');
+  }
+});
+test('preview config written after receipt is rejected, not re-receipted by generator', async t => {
+  const root = await fixture(t, 'ios'); await put(root, 'www/native/health-preview-config.json', JSON.stringify(previewConfig()));
+  await assert.rejects(generateHealthCandidate({ ...opts(root, 'ios'), enableOfflinePreview: true }, { generateNative: () => assert.fail('must not run') }));
+});
+test('preview config mutation by base generator is rejected as immutable input', async t => {
+  const root = await fixture(t, 'ios', previewConfig());
+  await assert.rejects(generateHealthCandidate({ ...opts(root, 'ios'), enableOfflinePreview: true }, { generateNative: runner(root, 'ios', () => put(root, 'www/native/health-preview-config.json', JSON.stringify({ ...previewConfig(), enabled: false }))) }), /Immutable input/);
+});
+test('manual preview wiring defaults off and conditionally passes both flags', async () => {
+  const workflow = await readFile(join(WRAPPER_ROOT, '.github/workflows/health-candidate.yml'), 'utf8');
+  assert.match(workflow, /enable_offline_preview:\s+type: boolean[\s\S]*?default: false/);
+  assert.equal((workflow.match(/ENABLE_OFFLINE_PREVIEW: \$\{\{ inputs.enable_offline_preview \}\}/g) || []).length, 3);
+  assert.match(workflow, /if \[ "\$ENABLE_OFFLINE_PREVIEW" = 'true' \]; then args\+=\(--offline-health-preview\); fi/);
+  assert.equal((workflow.match(/if \[ "\$ENABLE_OFFLINE_PREVIEW" = 'true' \]; then args\+=\(--enable-offline-preview\); fi/g) || []).length, 2);
+});
+
+for (const platform of ['ios', 'android']) test('receipted exact disabled config and native preview OFF remain scaffold only: ' + platform, async t => {
+  const root = await fixture(t, platform, { ...previewConfig(), enabled: false });
+  const receiptBefore = await readFile(join(root, 'www', RECEIPT_FILE));
+  const configBefore = await readFile(join(root, 'www/native/health-preview-config.json'));
+  const result = await generateHealthCandidate({ ...opts(root, platform), enableOfflinePreview: false }, { generateNative: runner(root, platform), plist: { parse: JSON.parse, build: JSON.stringify }, loadProject: () => projectFixture() });
+  assert.equal(result.healthScaffoldIncluded, true); assert.equal(result.healthInvocationEnabled, false); assert.equal(result.healthInvocationScope, undefined);
+  assert.deepEqual(await readFile(join(root, 'www', RECEIPT_FILE)), receiptBefore);
+  assert.deepEqual(await readFile(join(root, 'www/native/health-preview-config.json')), configBefore);
+});
+for (const [label, config] of [
+  ['malformed', '{broken'], ['null', 'null'], ['array', '[]'],
+  ['unknown key', { ...previewConfig(), enabled: false, unexpected: true }],
+  ['missing key', { schemaVersion: 1, enabled: false, accountMode: 'off', sourceSha: SOURCE_SHA }],
+  ['wrong source', { ...previewConfig(), enabled: false, sourceSha: '0'.repeat(40) }],
+  ['account on', { ...previewConfig(), enabled: false, accountMode: 'on' }],
+  ['enabled type', { ...previewConfig(), enabled: 0 }],
+  ['wrong contract', { ...previewConfig(), enabled: false, consumerContract: 'OTHER' }]
+]) test('native preview OFF rejects malformed or unbound receipted config before generation: ' + label, async t => {
+  const root = await fixture(t, 'ios', config); let ran = false;
+  await assert.rejects(generateHealthCandidate(opts(root, 'ios'), { generateNative: () => { ran = true; throw Error('must not run'); } }));
+  assert.equal(ran, false);
+});
+for (const damage of ['missing receipt', 'unreceipted config']) test('native preview OFF validates existing config receipt before generation: ' + damage, async t => {
+  const root = await fixture(t, 'ios', { ...previewConfig(), enabled: false }); let ran = false;
+  if (damage === 'missing receipt') await rm(join(root, 'www', RECEIPT_FILE));
+  else await put(root, 'www/native/health-preview-config.json', JSON.stringify({ ...previewConfig(), enabled: false }) + ' ');
+  await assert.rejects(generateHealthCandidate(opts(root, 'ios'), { generateNative: () => { ran = true; throw Error('must not run'); } }));
+  assert.equal(ran, false);
 });

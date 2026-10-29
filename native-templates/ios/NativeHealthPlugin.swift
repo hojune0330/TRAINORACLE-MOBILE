@@ -1,5 +1,6 @@
 // UNREVIEWED candidate: Capacitor 8.5.3 / iOS 16+. Explicit opt-in only.
 import Foundation
+import CoreFoundation
 import UIKit
 import WebKit
 import HealthKit
@@ -19,8 +20,14 @@ public final class NativeHealthPlugin: CAPPlugin, CAPBridgedPlugin {
     ]
     private let store = HKHealthStore()
     private var gate: NativeHealthMessageGate?
-    // Source-only fail-closed gate: real router/auth consumer is NOT integrated. JS cannot enable this.
-    private let consumerIntegrationReviewed = false
+    // Candidate build intent, NOT authentication. Parent must verify actual offline UI and account-OFF compile invariants.
+    // Missing keys, strings/numeric substitutes and account-enabled bundles fail closed. JS cannot change bundle Info.plist.
+    private var consumerIntegrationReviewed: Bool {
+        guard let flag = Bundle.main.object(forInfoDictionaryKey: "TrainOracleHealthOfflineConsumerIntegrated") as? NSNumber,
+              CFGetTypeID(flag) == CFBooleanGetTypeID(), flag.boolValue,
+              Bundle.main.object(forInfoDictionaryKey: "TrainOracleAccountMode") as? String == "off" else { return false }
+        return true
+    }
     private struct Binding {
         let document: Int; let context: Int; let session: Int; let lifecycle: Int
         let token: String; let requestId: String
@@ -135,11 +142,12 @@ public final class NativeHealthPlugin: CAPPlugin, CAPBridgedPlugin {
     }
     private func bind(_ call: CAPPluginCall) -> Binding? {
         guard consume(call) else { return nil }
-        guard consumerIntegrationReviewed else { call.reject("CONTEXT_CONSUMER_NOT_INTEGRATED"); return nil }
         guard let token = contextToken, token == call.getString("contextToken"),
               call.getInt("documentEpoch") == generation, call.getInt("contextEpoch") == contextEpoch, call.getInt("sessionEpoch") == sessionEpoch,
               let request = call.getString("requestId"), !request.isEmpty, request.count <= 128,
               !usedRequestIds.contains(request), usedRequestIds.count < 1024 else { drop(call); return nil }
+        // Stale/unbound calls drop BEFORE any disabled/busy error can target another consumer.
+        guard consumerIntegrationReviewed else { drop(call); return nil }
         guard !busy else { call.reject("BUSY"); return nil }
         let b = Binding(document: generation, context: contextEpoch, session: sessionEpoch, lifecycle: lifecycleEpoch, token: token, requestId: request)
         usedRequestIds.insert(request)
@@ -168,7 +176,17 @@ public final class NativeHealthPlugin: CAPPlugin, CAPBridgedPlugin {
     @objc func availability(_ call: CAPPluginCall) {
         DispatchQueue.main.async { [weak self] in
             guard let self = self, self.consume(call) else { return }
-            call.resolve(["available": HKHealthStore.isHealthDataAvailable(), "enabled": self.consumerIntegrationReviewed, "blockedReason": "CONTEXT_CONSUMER_NOT_INTEGRATED", "readAuthorization": "unknown", "reviewStatus": "UNREVIEWED"])
+            let available = HKHealthStore.isHealthDataAvailable() // Capability only: no samples or permission request.
+            let enabled = self.consumerIntegrationReviewed
+            let blockedReason: Any
+            if !enabled { blockedReason = "CONTEXT_CONSUMER_NOT_INTEGRATED" }
+            else if !available { blockedReason = "HEALTH_UNAVAILABLE" }
+            else { blockedReason = NSNull() }
+            call.resolve(["available": available, "enabled": enabled, "healthScaffoldIncluded": true,
+                          "healthInvocationEnabled": enabled && available, "consumerMode": "offline-preview",
+                          "accountMode": Bundle.main.object(forInfoDictionaryKey: "TrainOracleAccountMode") as? String == "off" ? "off" : "unverified",
+                          "blockedReason": blockedReason,
+                          "healthDataRead": false, "permissionRequested": false, "readAuthorization": "unknown", "reviewStatus": "UNREVIEWED"]) 
         }
     }
     private func begin(_ call: CAPPluginCall, binding: Binding? = nil, title: String, message: String, accepted: @escaping (Binding) -> Void) {
@@ -268,9 +286,12 @@ private final class NativeHealthMessageGate: NSObject, WKScriptMessageHandler {
     init(plugin: NativeHealthPlugin, downstream: WebViewDelegationHandler) { self.plugin = plugin; self.downstream = downstream }
     func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
         guard let body = message.body as? [String: Any] else { downstream?.userContentController(controller, didReceive: message); return }
-        let isHealth = body["pluginId"] as? String == "NativeHealth" || body["service"] as? String == "NativeHealth"
+        let pluginID = body["pluginId"] as? String
+        let service = body["service"] as? String
+        // Prevent alternate native-class IDs from bypassing the frame gate via Capacitor lazy loading.
+        let isHealth = [pluginID, service].compactMap { $0 }.contains { ["NativeHealth", "NativeHealthPlugin"].contains($0.components(separatedBy: ".").last ?? "") }
         guard isHealth else { downstream?.userContentController(controller, didReceive: message); return }
-        guard let plugin = plugin, body["type"] as? String == "message", message.frameInfo.isMainFrame,
+        guard pluginID == "NativeHealth", let plugin = plugin, body["type"] as? String == "message", message.frameInfo.isMainFrame,
               message.frameInfo.securityOrigin.protocol == "capacitor", message.frameInfo.securityOrigin.host == "localhost",
               message.frameInfo.securityOrigin.port == 0, plugin.trusted(message.frameInfo.request.url),
               plugin.trusted(message.webView?.url), let method = body["methodName"] as? String,

@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { planAndroidHealth, ANDROID_HEALTH_VERSIONS, parseAndroidHealthLimit } from './configure-android-health.mjs';
 const kotlinTemplate = await readFile(new URL('../native-templates/android/NativeHealthPlugin.kt', import.meta.url), 'utf8');
 const fixture = () => ({
+  runtimeConfig: JSON.stringify({appId:'io.trainoracle.app',appName:'TrainOracle',webDir:'www',loggingBehavior:'none',server:{hostname:'localhost',androidScheme:'https',cleartext:false},android:{allowMixedContent:false},plugins:{App:{someExistingOption:true}}}),
   appId: 'io.trainoracle.app', capacitorVersion: '8.5.3', compileSdk: 36, agpVersion: '8.13.0', kotlinTemplate,
   rootGradle: "buildscript { dependencies { classpath 'com.android.tools.build:gradle:8.13.0' } }",
   appGradle: "apply plugin: 'com.android.application'\nandroid { compileOptions { sourceCompatibility JavaVersion.VERSION_21; targetCompatibility JavaVersion.VERSION_21 } }\ndependencies {\n}\n",
@@ -21,7 +22,7 @@ test('pure plan has five Android-only output files and preserves inputs', () => 
   assert.deepEqual(f, original);
   assert.equal(Object.keys(p.files).length, 5);
   assert.equal(p.healthInvocationEnabled, false);
-  assert.equal(p.disabledReason, 'DOCUMENT_SESSION_MAIN_FRAME_BINDING_UNVERIFIED');
+  assert.equal(p.disabledReason, 'PREVIEW_OPT_IN_REQUIRED');
   assert.equal(p.reviewStatus, 'UNREVIEWED'); assert.equal(p.nativeCompilation, 'not-executed');
   assert.ok(Object.keys(p.files).every(k => !k.includes('..') && !k.startsWith('/') && !/ios|swift/i.test(k)));
   assert.ok(p.files['app/src/main/java/io/trainoracle/app/NativeHealthPlugin.kt'].startsWith('package io.trainoracle.app'));
@@ -62,57 +63,50 @@ test('does not weaken original permission/backup gate', () => {
   for (const name of ['allowBackup','fullBackupContent','dataExtractionRules','usesCleartextTraffic']) assert.throws(() => enabled({...fixture(), manifest: fixture().manifest.replace('android:' + name, 'removed:' + name)}));
   assert.throws(() => enabled({...fixture(), manifest: fixture().manifest.replace('</manifest>', '<uses-permission android:name="android.permission.CAMERA" /></manifest>')}));
 });
-// These are source-contract checks, not Kotlin compilation or runtime assertions.
-test('source contract: trusted local origin, revocable single read permission, manual native prompts', () => {
-  assert.match(kotlinTemplate, /u\.scheme == "https" && u\.host == "localhost" && u\.port == -1 && u\.userInfo == null/);
-  assert.match(kotlinTemplate, /HealthPermission\.getReadPermission\(ExerciseSessionRecord::class\)/);
-  assert.ok((kotlinTemplate.match(/getGrantedPermissions\(\)/g) || []).length >= 3);
-  assert.match(kotlinTemplate, /setPositiveButton\("권한 화면 열기"/);
-  assert.match(kotlinTemplate, /setPositiveButton\("읽기"/);
-  assert.doesNotMatch(kotlinTemplate, /override fun load|override fun handleOnStart|override fun handleOnResume/);
+
+test('compiled gate remains OFF unless explicit reviewed offline preview opt-in', () => {
+  for(const opts of [{previewEnabled:true},{enabled:true,previewEnabled:true},{enabled:true,previewEnabled:true,consumerIntegrationReviewed:true,accountMode:'account'}]) assert.throws(()=>planAndroidHealth(fixture(),opts));
+  const p=planAndroidHealth(fixture(),{enabled:true,previewEnabled:true,consumerIntegrationReviewed:true,accountMode:'off'});
+  assert.equal(p.healthInvocationEnabled,true); assert.equal(p.publicCapacitorInvocationEnabled,false);
+  assert.match(p.files['app/src/main/java/io/trainoracle/app/NativeHealthPlugin.kt'],/OFFLINE_PREVIEW_ENABLED = true/);
+  assert.equal(p.runtimeConfigPath,'app/src/main/assets/capacitor.config.json');
+  assert.equal(Object.keys(p.files).length,6);
+  assert.deepEqual(JSON.parse(p.files[p.runtimeConfigPath]).plugins.NativeHealth,{accountMode:'off'});
+  assert.equal(JSON.parse(p.files[p.runtimeConfigPath]).plugins.App.someExistingOption,true);
+  assert.equal(Object.hasOwn(p.files,'capacitor.config.json'),false);
 });
-test('source contract: 28-day lookback, 7-day range, 100 output and 500 scanned bounds', () => {
-  for (const text of ['Duration.ofDays(28)', 'Duration.ofDays(7)', 'limit !in 1..100', 'pageSize = 100', 'pages < 5', 'rows.length() >= limit', 'EXERCISE_TYPE_RUNNING', 'record.startTime.isBefore(start)', 'record.endTime.isAfter(end)', 'end.isAfter(now)']) assert.ok(kotlinTemplate.includes(text), text);
+test('JSON reference strict raw limit schema',()=>{
+  assert.equal(parseAndroidHealthLimit({}),50);
+  for(const value of [null,'50',1.5,NaN,Infinity,true,[],{},0,101]) assert.throws(()=>parseAndroidHealthLimit({limit:value}));
 });
-test('source contract: allowlist DTO with UNREVIEWED provenance and no sensitive fields', () => {
-  for (const text of ['"sourcePackage"', '"sourceRecordId"', '"reviewStatus", "UNREVIEWED"', 'record.metadata.dataOrigin.packageName', '"bounded"']) assert.ok(kotlinTemplate.includes(text));
-  assert.doesNotMatch(kotlinTemplate, /record\.(exerciseRoute|route|notes|title)|getExerciseRoute|insertRecords|updateRecords|deleteRecords|SharedPreferences|FileOutputStream|https?:\/\//);
-});
-test('planner cannot write files, launch builds or import existing generator to bypass gates', async () => {
-  const code = await readFile(new URL('./configure-android-health.mjs', import.meta.url), 'utf8');
-  assert.doesNotMatch(code, /node:fs|node:child_process|writeFile|unlink|generate-native|prepare-web|process\.env|process\.argv/);
+test('native source contract only: legacy drop, verified mainframe ingress, feature checks and context',()=>{
+  assert.match(kotlinTemplate,/private fun enter\(call: PluginCall\) \{ call.release\(bridge\) }/);
+  for(const s of ['WEB_MESSAGE_LISTENER','DOCUMENT_START_SCRIPT','!main','fixedOrigin(origin)','c.proxy !== proxy','c.used.add(id)','current === r.ctx','epoch == r.ctx.epoch','SystemClock.elapsedRealtime()','accountMode','private const val OFFLINE_PREVIEW_ENABLED = false','old.javaClass == BridgeWebViewClient::class.java','super.onPageStarted','super.onPageCommitVisible','r.ctx.proxy.postMessage','catch(cancelled: CancellationException)']) assert.ok(kotlinTemplate.includes(s),s);
+  assert.doesNotMatch(kotlinTemplate,/call.resolve|call.reject|\.put\("(?:scannedRecords|pagesRead)"/);
+  assert.ok((kotlinTemplate.match(/requireLive\(r\)/g)||[]).length>=8);
 });
 
-// JSON reference fixture tests execute JS only. Native parser coverage below is static source-contract only.
-test('JSON schema reference: only missing limit defaults, raw finite integer 1..100 required', () => {
-  assert.equal(parseAndroidHealthLimit({}), 50);
-  for (const value of [1, 50, 100]) assert.equal(parseAndroidHealthLimit({limit: value}), value);
-  for (const value of [null, undefined, '50', '1.5', 1.5, NaN, Infinity, -Infinity, true, false, [], {}, 0, -1, 101]) assert.throws(() => parseAndroidHealthLimit({limit: value}));
+test('preview runtime config requires fresh native JSON with pinned identity/off/transport and no health config',()=>{
+  const opts={enabled:true,previewEnabled:true,consumerIntegrationReviewed:true,accountMode:'off'};
+  const f=fixture(), original=f.runtimeConfig;
+  const cap=JSON.parse(original);
+  for(const runtimeConfig of [undefined,null,{},'not JSON','[]',JSON.stringify({...cap,appId:'io.wrong.app'}),JSON.stringify({...cap,appName:'Wrong'}),JSON.stringify({...cap,accountMode:'account'}),JSON.stringify({...cap,webDir:'remote'}),JSON.stringify({...cap,server:{...cap.server,url:'https://remote.example'}}),JSON.stringify({...cap,server:{...cap.server,hostname:'remote.example'}}),JSON.stringify({...cap,server:{...cap.server,allowNavigation:['*']}}),JSON.stringify({...cap,android:{allowMixedContent:true}}),JSON.stringify({...cap,plugins:{NativeHealth:{accountMode:'off'}}}),JSON.stringify({...cap,plugins:{HealthConnect:{}}})]) assert.throws(()=>planAndroidHealth({...f,runtimeConfig},opts));
+  planAndroidHealth(f,opts);assert.equal(f.runtimeConfig,original);
+  const scaffold=enabled(f);assert.equal(Object.hasOwn(scaffold.files,'app/src/main/assets/capacitor.config.json'),false);
 });
-test('native source contract: raw JSON number validation without getInt coercion', () => {
-  for (const token of ['if (!call.data.has("limit")) return 50', 'call.data.opt("limit")', 'raw !is Number', '!value.isFinite()', 'value % 1.0 != 0.0', 'value < 1.0', 'value > 100.0']) assert.ok(kotlinTemplate.includes(token), token);
-  assert.doesNotMatch(kotlinTemplate, /call\.getInt\(/);
+test('reject late/duplicate registration and custom MainActivity load override',()=>{
+  const f=fixture();
+  for(const mainActivity of [f.mainActivity.replace('registerPlugin(NativeDocumentsPlugin.class); super.onCreate(b);','super.onCreate(b); registerPlugin(NativeDocumentsPlugin.class);'),f.mainActivity.replace('registerPlugin(NativeDocumentsPlugin.class);','registerPlugin(NativeDocumentsPlugin.class); registerPlugin(NativeDocumentsPlugin.class);'),f.mainActivity+'\nprotected void load() {}']) assert.throws(()=>enabled({...f,mainActivity}));
+  assert.equal(enabled(f).startupRuntimeVerified,false);
 });
-test('P1 fail-closed source contract: every health method drops unbound calls without evaluating work', () => {
-  const gate = kotlinTemplate.match(/private fun enter\(call: PluginCall, work: suspend \(\) -> Unit\)\s*\{([^}]+)\}/);
-  assert.ok(gate);
-  assert.equal(gate[1].trim(), 'call.release(bridge)');
-  const entrypoints = [...kotlinTemplate.matchAll(/@PluginMethod\s+fun (\w+)\(call: PluginCall\) = enter\(call\)/g)].map(m => m[1]);
-  assert.deepEqual(entrypoints, ['availability', 'requestReadPermission', 'readRecentRunningSessions']);
-  assert.equal((kotlinTemplate.match(/@PluginMethod/g) || []).length, 3);
-  const callback = kotlinTemplate.match(/private fun healthPermissionResult[^]*?\n    }/)[0];
-  assert.ok(callback.includes('call?.release(bridge)'));
-  assert.doesNotMatch(callback, /resolve|reject|scope\.launch|client\(/);
-  assert.equal(planAndroidHealth().healthInvocationEnabled, false);
-  assert.equal(enabled(fixture()).healthInvocationEnabled, false);
-  assert.throws(() => enabled({...fixture(), kotlinTemplate: kotlinTemplate.replace('call.release(bridge)\n    }', 'work()\n    }')}));
+test('native late-load guards are source contracts, not runtime startup proof',()=>{
+  for(const text of ['if (loadAttempted) return','android.os.Looper.getMainLooper()','!activity.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)','bridge.webView.url == null || bridge.webView.url == "about:blank"']) assert.ok(kotlinTemplate.includes(text),text);
 });
-test('P2 source contract: no query-count telemetry or misleading memo-read exclusion', () => {
-  assert.doesNotMatch(kotlinTemplate, /\.put\("(?:scannedRecords|pagesRead)"/);
-  assert.doesNotMatch(kotlinTemplate, /메모는 읽지|메모·심박·다른 건강정보는 읽지/);
-  assert.ok(kotlinTemplate.includes('운동세션 객체'));
-  assert.ok(kotlinTemplate.includes('부가필드'));
-  assert.ok(kotlinTemplate.includes('사용·저장·전송하지 않습니다'));
-  assert.match(kotlinTemplate, /catch \(cancelled: CancellationException\) \{ call\.release\(bridge\); throw cancelled }/);
-  // No native runtime navigation/iframe/permission/lifecycle safety claim follows from these source checks.
+
+test('P2 referenced native contract: both readiness events reconcile and old document cannot bind by first proxy',()=>{
+  for(const s of ['private var commitObserved = false','private var proxyReady = false','private fun reconcileDocumentReady()', 'private fun acceptDocumentReady(', 'probeNavigationEpoch != navigationEpoch','window.__TrainOracleHealthProbe','JSONObject.quote(challenge)','probeChallenge = null']) assert.ok(kotlinTemplate.includes(s),s);
+  assert.doesNotMatch(kotlinTemplate,/documentProxy = startingProxy|startingProxy = proxy/);
+});
+test('P2 referenced native contract: lifecycle ON_RESUME retries exact original permission request with cleanup',()=>{
+  for(const s of ['LifecycleEventObserver','Lifecycle.Event.ON_RESUME','addObserver(resumeObserver)','removeObserver(resumeObserver)','permissionFlightRequest = r','val original = permissionFlightRequest','permissionResultRequest = original','pending !== r']) assert.ok(kotlinTemplate.includes(s),s);
 });

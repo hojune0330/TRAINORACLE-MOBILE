@@ -1,0 +1,11 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
+import {parseOfflineHealthBuildArgs,createOfflineHealthBuildConfig,OFFLINE_HEALTH_CONTRACT} from './offline-health-config.mjs';
+const sha='a'.repeat(40);
+test('default source build keeps health preview off',()=>{assert.deepEqual(parseOfflineHealthBuildArgs(['--source','checkout']),{source:'checkout',offlineHealthPreview:false});assert.equal(createOfflineHealthBuildConfig({sourceSha:sha,accountMode:'off'}).enabled,false);});
+test('preview requires exact explicit argument',()=>assert.deepEqual(parseOfflineHealthBuildArgs(['--source','checkout','--offline-health-preview']),{source:'checkout',offlineHealthPreview:true}));
+for(const args of [[],['--source'],['--source','--offline-health-preview'],['--source','checkout','--unknown'],['--offline-health-preview','--source','checkout'],['--source','checkout','--offline-health-preview','--offline-health-preview']])test('invalid build args '+JSON.stringify(args),()=>assert.throws(()=>parseOfflineHealthBuildArgs(args)));
+test('config is exact offline source-bound and frozen',()=>{const c=createOfflineHealthBuildConfig({enabled:true,accountMode:'off',sourceSha:sha});assert.deepEqual(c,{schemaVersion:1,enabled:true,accountMode:'off',sourceSha:sha,consumerContract:OFFLINE_HEALTH_CONTRACT});assert.equal(Object.isFrozen(c),true);});
+for(const delta of [{enabled:'true'},{accountMode:'on'},{accountMode:undefined},{sourceSha:'main'},{sourceSha:'a'.repeat(39)}])test('unsafe config '+JSON.stringify(delta),()=>assert.throws(()=>createOfflineHealthBuildConfig({enabled:true,accountMode:'off',sourceSha:sha,...delta})));
+test('config enters final receipt and source remains pinned',async()=>{const s=await readFile(new URL('./prepare-release.mjs',import.meta.url),'utf8');assert.ok(s.indexOf('health-preview-config.json')<s.indexOf('const finalReceipt=await prepareOutput'));assert.match(s,/sourceSha:SOURCE_SHA/);assert.match(s,/__TRAINORACLE_OFFLINE_HEALTH_PREVIEW__/);});

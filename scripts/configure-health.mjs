@@ -1,6 +1,8 @@
 // UNREVIEWED candidate. Pure transforms only; importing never writes files.
 export const HEALTH_SOURCE = 'NativeHealthPlugin.swift';
 export const HEALTH_ENTITLEMENTS_PATH = 'App/TrainOracleHealth.entitlements';
+export const HEALTH_CONSUMER_PLIST_KEYS = Object.freeze({ integrated: 'TrainOracleHealthOfflineConsumerIntegrated', accountMode: 'TrainOracleAccountMode' });
+export const HEALTH_CONSUMER_MODE = 'offline-preview';
 export const HEALTH_USAGE = '선택한 최근 달리기의 날짜, 운동 시간, 거리를 읽어 미검토 가져오기 후보로 표시합니다. 기존 기록을 자동 변경하거나 건강 데이터에 쓰지 않습니다.';
 const clone = x => structuredClone(x);
 function optIn(enabled) {
@@ -13,16 +15,28 @@ export function transformHealthBridge(text, { enabled = false } = {}) {
   if (text.split(anchor).length !== 2 || !/override func capacitorDidLoad\(\)/.test(text) || /NativeHealthPlugin/.test(text)) throw new Error('Unexpected/previously configured bridge');
   return text.replace(anchor, anchor + '\n        bridge?.registerPluginInstance(NativeHealthPlugin())');
 }
-export function createHealthPlan({ enabled = false, info = {}, entitlements = {}, bridgeSource = '', sources = [] } = {}) {
+export function createHealthPlan({ enabled = false, consumerIntegrated = false, accountMode, info = {}, entitlements = {}, bridgeSource = '', sources = [] } = {}) {
   optIn(enabled);
-  const plan = { enabled, info: clone(info), entitlements: clone(entitlements), bridgeSource, sources: [...sources], generatedFiles: [], reviewStatus: 'UNREVIEWED', consumerIntegrationReviewed: false, healthDataGate: 'CONTEXT_CONSUMER_NOT_INTEGRATED' };
+  if (typeof consumerIntegrated !== 'boolean') throw new Error('consumerIntegrated must be an explicit boolean');
+  if (consumerIntegrated && (!enabled || accountMode !== 'off')) throw new Error('Offline consumer requires enabled scaffold and explicit accountMode off');
+  const invocationEnabled = enabled && consumerIntegrated && accountMode === 'off';
+  // Build intent only, NOT proof of actual consumer wiring/authentication/device success.
+  const plan = { enabled, info: clone(info), entitlements: clone(entitlements), bridgeSource, sources: [...sources], generatedFiles: [], reviewStatus: 'UNREVIEWED',
+    healthScaffoldIncluded: enabled, healthInvocationEnabled: invocationEnabled,
+    consumerIntegrationReviewed: invocationEnabled, consumerMode: invocationEnabled ? HEALTH_CONSUMER_MODE : null,
+    accountMode: invocationEnabled ? 'off' : null, healthDataGate: invocationEnabled ? 'OFFLINE_PREVIEW_OPT_IN' : 'CONTEXT_CONSUMER_NOT_INTEGRATED' };
   if (!enabled) return plan;
+  if (Object.values(HEALTH_CONSUMER_PLIST_KEYS).some(k => Object.hasOwn(info, k))) throw new Error('Preexisting consumer/account flags require review');
   if (Object.keys(entitlements).length || Object.keys(info).some(k => /^NSHealth/.test(k))) throw new Error('Existing health/entitlement configuration requires review');
   if (info.MinimumOSVersion && info.MinimumOSVersion !== '16.0') throw new Error('Expected iOS 16.0');
   if (sources.includes(HEALTH_SOURCE)) throw new Error('Health source already present');
   plan.bridgeSource = transformHealthBridge(bridgeSource, { enabled: true });
   plan.info.NSHealthShareUsageDescription = HEALTH_USAGE;
   plan.info.MinimumOSVersion = '16.0';
+  if (invocationEnabled) {
+    plan.info[HEALTH_CONSUMER_PLIST_KEYS.integrated] = true;
+    plan.info[HEALTH_CONSUMER_PLIST_KEYS.accountMode] = 'off';
+  }
   plan.entitlements = { 'com.apple.developer.healthkit': true };
   plan.sources.push(HEALTH_SOURCE);
   plan.generatedFiles = [

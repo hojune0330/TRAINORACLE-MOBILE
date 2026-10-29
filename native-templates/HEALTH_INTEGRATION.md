@@ -95,3 +95,35 @@ agent-reach의 Jina Reader 경로로 Apple 공식 문서 내용을 확인했다.
 willResignActive는 데이터 조회·앱 자체 동의창을 무효화하고 진행 중 query를 stop한다. 단, HealthKit 시스템 권한 UI의 정상적인 일시 inactive는 permission phase에서 따로 처리한다. 이때 완료 응답은 실제 foreground 복귀까지 보류하고 다시 검사한다. **실제 didEnterBackground는 permission phase도 포함해 모두 무효화한다.** 백그라운드 후 늦은 query 결과는 foreground로 돌아와도 새 화면에 전달하지 않는다. 복귀 시 자동 재조회/자동 재허가는 없다.
 
 추가 실행: `node --test tests/ios-health-context.test.mjs` (합성 JS 및 Swift 소스 불변식 검사). 기존 `node --test scripts/configure-health.test.mjs`도 재실행한다. 새 테스트 역시 Swift compile, WebKit frame 전달, UIKit permission lifecycle, HealthKit 실기기 성공의 증거가 아니다. macOS/Xcode에서 `releaseCall` API/타입과 observer 수명, 실제 권한 UI 일시 inactive/진짜 background, SPA 전환 및 로그인·계정 교체 지연 결과, 같은 문서 동일 URL reload, callback release 동작을 별도 검증해야 한다. 후보 CI의 이전 커밋 결과가 이 변경을 검증하지 않으므로 부모의 새 커밋으로 다시 실행해야 한다.
+
+## Offline-only preview 소비자 opt-in 준비 (최신 계약, 위 상수 차단 설명을 대체)
+
+하드코딩 false를 무조건 true로 바꾸지 않았다. 기본 OFF이고, 네이티브는 생성 번들 Info.plist의 두 조건을 함께 확인한다.
+
+- `TrainOracleHealthOfflineConsumerIntegrated`: **plist boolean true**만 허용. string/숫자 대체를 허용하지 않도록 CFBoolean 타입까지 검사한다.
+- `TrainOracleAccountMode`: 정확한 문자열 `off`.
+
+이는 부모가 offline-only consumer 연결을 검토했다는 **후보 빌드 의도**일 뿐 인증/일반 계정 격리 증명이 아니다. 실제 계정 코드가 OFF로 컴파일·패키징됐는지, 실제 독립 preview가 후보 검토만 하며 서버 전송/기존 기록 변경을 하지 않는지, SPA invalidate-before-transition hook이 모두 연결됐는지 부모가 검수해야 한다. Info.plist 두 값만으로 실제 UI 연결 완료를 주장하면 안 된다. 현재 이 작업은 bootstrap/UI를 편집하지 않았고 플래그도 생성물에 적용하지 않았다.
+
+helper exports: `createHealthPlan`, `HEALTH_CONSUMER_PLIST_KEYS`, `HEALTH_CONSUMER_MODE`, 기존 transform/configure exports 유지.
+
+```js
+// 기존 기본/스캐폴드만: 실제 호출은 disabled, consumer plist 키 미생성
+createHealthPlan({ enabled: true, bridgeSource, info, sources });
+// 부모가 실제 offline-only UI와 account-OFF compile invariant를 검수한 후에만:
+createHealthPlan({ enabled: true, consumerIntegrated: true, accountMode: 'off', bridgeSource, info, sources });
+```
+
+`consumerIntegrated` 기본값 false, truthy 문자열/숫자는 오류다. true이면 enabled:true와 명시 accountMode:'off'가 모두 필요하다. 기존 consumer/account plist 키는 우연한 활성화를 막기 위해 거절한다. OFF metadata는 `healthScaffoldIncluded:false`, `healthInvocationEnabled:false`, `consumerIntegrationReviewed:false`, `healthDataGate:'CONTEXT_CONSUMER_NOT_INTEGRATED'`이다. scaffold-only는 scaffoldIncluded만 true다. 명시 offline opt-in 때 `healthInvocationEnabled:true`, `consumerMode:'offline-preview'`, `accountMode:'off'`, `healthDataGate:'OFFLINE_PREVIEW_OPT_IN'`를 반환한다. 이 metadata도 실제 기기 가용성/권한 허용/검증 완료를 뜻하지 않는다.
+
+standalone facade exports: `createIOSHealthContext`, `IOS_HEALTH_CONSUMER_INTEGRATED`(false 기본값), `IOS_HEALTH_STATUS_FIELDS`, `IOS_HEALTH_WORKOUT_FIELDS`. 반환 메서드: `.availability()`, `.open()`, `.request(method, query?)`, `.invalidate(scope?)`, `.invalidateContext()`, `.invalidateSession()`, `.background()`, `.dispose()`.
+
+부모는 native NativeHealth 객체로 facade를 만들고, 실제 preview hook 연결 시에만 consumerIntegrated:true를 전달한다. `.availability()`는 consumerIntegrated:false/open 이전에도 호출 가능하며 native beginContext/권한요청/샘플조회를 호출하지 않는다. 다만 native WK main-frame·origin 티켓·foreground 검증은 그대로 적용된다. unavailable plugin/비활성/iframe/drop의 Promise는 소비자 타임아웃 및 오류 UI로 처리한다.
+
+상태 DTO: `{available:boolean, enabled:boolean, healthScaffoldIncluded:true, healthInvocationEnabled:boolean, consumerMode:'offline-preview', accountMode:'off'|'unverified', blockedReason:null|'CONTEXT_CONSUMER_NOT_INTEGRATED'|'HEALTH_UNAVAILABLE', healthDataRead:false, permissionRequested:false, readAuthorization:'unknown', reviewStatus:'UNREVIEWED'}`. `available`은 기기 지원 여부, `enabled`는 번들 opt-in 조건, invocationEnabled는 둘 모두를 뜻한다. 활성 상태에도 읽기 권한 허용을 의미하지 않는다. facade는 상태 필드 whitelist만 반환한다.
+
+건강 응답 envelope는 기존 source/reviewStatus/readAuthorization/emptyDoesNotMeanDenied와 requestId/documentEpoch/contextEpoch/sessionEpoch를 유지한다. workouts 각 행은 `{uuid:string,start:ISO8601,end:ISO8601,durationSeconds:number,distanceMeters:number|null}`만이다. permission 응답도 동일 request/epoch 바인딩과 requestCompleted:true/readAuthorization:unknown을 유지한다.
+
+부모 wiring: 기존 생성기 opt-in 전달 → helper가 생성한 두 plist 키 직렬화 → 실제 offline preview에서 availability 표시 → open 후 사용자 버튼으로 requestAuthorization/readRunningWorkouts → 화면 이동 전 invalidate를 await → background/dispose hook. 기존 WK ticket/doc/context/session/lifecycle/requestId/foreground/native confirmation 검사는 그대로이며, 별칭 NativeHealthPlugin/App.NativeHealthPlugin은 canonical NativeHealth 이외로 전달하지 않아 lazy-load frame 우회를 막는다. stale/unbound 결과는 configuration/busy 오류보다 먼저 drop한다. 실제 HealthKit 조회/서명/외부 계정/배포는 이 준비 작업에서 수행하지 않았다.
+
+Swift 번들 게이트/API 상태 DTO가 변경됐으므로 a58dad의 이전 CI 성공은 이 변경의 컴파일 증거가 아니다. 부모의 **새 커밋 iOS 빌드가 필요**하며, JS/소스 fixture는 네이티브 iframe·생명주기/실기기 성공 증거가 아니다.

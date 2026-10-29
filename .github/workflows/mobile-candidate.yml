@@ -3,6 +3,10 @@ name: Mobile candidate (no signing or store upload)
 on:
   workflow_dispatch:
     inputs:
+      offline_health_preview:
+        type: boolean
+        description: Explicit offline read-only health preview candidate
+        default: false
       health_candidate:
         type: boolean
         description: Explicit opt-in to UNREVIEWED read-only health candidate
@@ -57,7 +61,13 @@ jobs:
       - name: Wrapper-only tests (not original source regression)
         run: npm test
       - name: Immutable offline source build and native adapter bundle
-        run: node scripts/prepare-release.mjs --source ../upstream
+        run: |
+          if [ "${{ inputs.offline_health_preview }}" = "true" ]; then
+            test "${{ inputs.health_candidate }}" = "true"
+            node scripts/prepare-release.mjs --source ../upstream --offline-health-preview
+          else
+            node scripts/prepare-release.mjs --source ../upstream
+          fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: mobile-web-${{ github.run_id }}
@@ -94,7 +104,11 @@ jobs:
       - name: Generate isolated Android project
         run: |
           if [ "${{ inputs.health_candidate }}" = "true" ]; then
+            if [ "${{ inputs.offline_health_preview }}" = "true" ]; then
+              node scripts/generate-health-candidate.mjs --enable-health --platform android --enable-offline-preview
+            else
             node scripts/generate-health-candidate.mjs --enable-health --platform android
+            fi
           else
             node scripts/generate-native.mjs --platform android
           fi
@@ -156,7 +170,11 @@ jobs:
       - name: Generate isolated iOS project
         run: |
           if [ "${{ inputs.health_candidate }}" = "true" ]; then
+            if [ "${{ inputs.offline_health_preview }}" = "true" ]; then
+              node scripts/generate-health-candidate.mjs --enable-health --platform ios --enable-offline-preview
+            else
             node scripts/generate-health-candidate.mjs --enable-health --platform ios
+            fi
           else
             node scripts/generate-native.mjs --platform ios
           fi
