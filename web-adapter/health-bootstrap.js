@@ -12,7 +12,8 @@ export function createOfflineHealthDriver(env,{platform,native,iosFactory=create
   return Object.freeze({
     open:()=>invoke(underlying.open),
     request:(method,input={})=>{
-      if(!['requestAuthorization','readRunningWorkouts'].includes(method))return Promise.reject(new Error('INVALID_METHOD'));
+      if(!['availability','requestAuthorization','readRunningWorkouts'].includes(method))return Promise.reject(new Error('INVALID_METHOD'));
+      if(method==='availability')return invoke(underlying.availability);
       const clean=method==='readRunningWorkouts'?Object.fromEntries(['start','end','limit'].filter(k=>Object.hasOwn(input,k)).map(k=>[k,input[k]])):{};
       const androidInput=method==='readRunningWorkouts'?{startTime:clean.start,endTime:clean.end,...(Object.hasOwn(clean,'limit')?{limit:clean.limit}:{})}:{};
       return platform==='ios'?invoke(underlying.request,method,clean):invoke(underlying[method],androidInput);

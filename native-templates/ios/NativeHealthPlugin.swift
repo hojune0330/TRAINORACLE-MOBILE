@@ -262,6 +262,7 @@ public final class NativeHealthPlugin: CAPPlugin, CAPBridgedPlugin {
                         guard self.current(version) else { self.drop(call); return }
                         guard error == nil else { self.finish(version, call, error: "HEALTH_QUERY_FAILED"); return }
                         let formatter = ISO8601DateFormatter()
+                        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
                         let rows: [[String: Any]] = (samples as? [HKWorkout] ?? []).map { workout in
                             var row: [String: Any] = ["uuid": workout.uuid.uuidString, "start": formatter.string(from: workout.startDate), "end": formatter.string(from: workout.endDate), "durationSeconds": workout.duration]
                             if let distance = workout.totalDistance?.doubleValue(for: .meter()), distance.isFinite, distance >= 0 { row["distanceMeters"] = distance }

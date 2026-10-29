@@ -14,3 +14,15 @@ function underlying(){return {open(){},request(){},requestAuthorization(){},read
 for(const platform of ['ios','android'])test('normalized requests strip forged binding/account/raw fields '+platform,async()=>{const u=underlying();let got;u.request=(m,a)=>{got={m,a};return {ok:true}};u.readRunningWorkouts=a=>{got={m:'readRunningWorkouts',a};return {ok:true}};const d=createOfflineHealthDriver(env(platform),{platform,native:{},iosFactory:()=>u,androidFactory:()=>u});assert.deepEqual(await d.request('readRunningWorkouts',{start:'s',end:'e',limit:3,accountId:'forged',contextToken:'forged',gps:'discard'}),{ok:true});assert.deepEqual(got,{m:'readRunningWorkouts',a:platform==='ios'?{start:'s',end:'e',limit:3}:{startTime:'s',endTime:'e',limit:3}});await assert.rejects(d.request('writeWorkout',{}),/INVALID_METHOD/);});
 test('native error text/cause never escape the common consumer',async()=>{const u=underlying();u.request=()=>{throw Object.assign(Error('RAW_PRIVATE'),{cause:'RAW_PRIVATE'})};const d=createOfflineHealthDriver(env(),{platform:'ios',iosFactory:()=>u});await assert.rejects(d.request('requestAuthorization'),e=>e.code==='HEALTH_PREVIEW_UNAVAILABLE'&&!e.cause&&!e.message.includes('RAW_PRIVATE'));});
 test('manual cancellation is retained as fixed code only',async()=>{const u=underlying();u.request=()=>{throw Error('USER_CANCELLED')};const d=createOfflineHealthDriver(env(),{platform:'ios',iosFactory:()=>u});await assert.rejects(d.request('requestAuthorization'),e=>e.code==='USER_CANCELLED');});
+
+for (const platform of ['ios','android']) test('manual availability uses status facade only and strips all caller input: '+platform, async()=>{
+  const u=underlying(), calls=[]; u.availability=()=>{calls.push('availability'); return {status:'fixture'}};
+  u.request=()=>assert.fail('no health request'); u.requestAuthorization=()=>assert.fail('no permission prompt'); u.readRunningWorkouts=()=>assert.fail('no sample read');
+  const d=createOfflineHealthDriver(env(platform),{platform,iosFactory:()=>u,androidFactory:()=>u});
+  assert.deepEqual(await d.request('availability',{accountId:'discard',token:'discard',start:'discard'}),{status:'fixture'});
+  assert.deepEqual(calls,['availability']);
+});
+test('missing availability API becomes fixed safe error, not raw exception',async()=>{
+  const d=createOfflineHealthDriver(env(),{platform:'ios',iosFactory:()=>underlying()});
+  await assert.rejects(d.request('availability'),e=>e.code==='HEALTH_PREVIEW_UNAVAILABLE'&&!e.cause);
+});

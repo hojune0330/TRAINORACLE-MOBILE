@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { createOfflineHealthPreviewController as create, installOfflineHealthPreview as install, normalizeHealthPreview as normalize } from '../web-adapter/offline-health-preview.js';
+import { createOfflineHealthPreviewController as create, installOfflineHealthPreview as install, normalizeHealthPreview as normalize, normalizeHealthAvailability as normalizeStatus } from '../web-adapter/offline-health-preview.js';
 import { createIOSHealthContext } from '../web-adapter/ios-health-context.js';
 const row = (patch = {}) => ({ uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', start: '2026-10-28T10:00:00Z', end: '2026-10-28T10:10:00Z', durationSeconds: 590, distanceMeters: null, ...patch });
 const payload = (patch = {}) => ({ source: 'apple-healthkit', workouts: [row()], ...patch });
@@ -126,7 +126,7 @@ function dom() {
 test('DOM fixture manual buttons, safe text, own mutations, synchronous routing invalidation, cleanup', async () => {
   const env = dom(), f = fixture(), original = env.history.pushState;
   const c = install(env, { driver: f.driver, platform: 'ios', enabled: true }); const root = env.document.body.children[0], [entry, dialog] = root.children;
-  const [, , auth, read, close, , list] = dialog.children;
+  const [, , check, auth, read, close, , list] = dialog.children;
   assert.equal(entry.textContent, '건강 기록 미리보기'); assert.deepEqual(f.calls, []);
   entry.emit('click', { isTrusted: false }); assert.equal(c.getState().visible, false);
   entry.emit('click', { isTrusted: true }); assert.equal(c.getState().visible, true); assert.deepEqual(f.calls, []);
@@ -153,7 +153,7 @@ for (const event of ['popstate', 'hashchange', 'pagehide', 'blur', 'visibilitych
 for (const detach of ['bodyreplacement', 'rootremoved']) for (const result of ['success', 'error']) for (const observerFirst of [false, true]) test(`detached ${detach}: late ${result}, observerFirst=${observerFirst}`, async () => {
   const env = dom(), f = fixture(), originalHistory = env.history.pushState;
   const c = install(env, { driver: f.driver, platform: 'ios', enabled: true });
-  const body = env.document.body, root = body.children[0], [entry, dialog] = root.children, list = dialog.children[6];
+  const body = env.document.body, root = body.children[0], [entry, dialog] = root.children, list = dialog.children[7];
   try {
     c.open(); const pending = c.read(); await tick(); const epoch = c.getState().epoch;
     if (detach === 'bodyreplacement') env.replaceBody(); else root.remove();
@@ -187,7 +187,7 @@ for (const detach of ['bodyreplacement', 'rootremoved']) test('late native open 
 });
 for (const detach of ['bodyreplacement', 'rootremoved']) test('observer disposes already rendered preview after ' + detach, async () => {
   const env = dom(), f = fixture(), c = install(env, { driver: f.driver, platform: 'ios', enabled: true });
-  const body = env.document.body, root = body.children[0], dialog = root.children[1], list = dialog.children[6];
+  const body = env.document.body, root = body.children[0], dialog = root.children[1], list = dialog.children[7];
   try {
     assert.ok(env.observer.observed.some(o => o.target === env.document.documentElement));
     c.open(); const p = c.read(); await tick(); f.requests[0].resolve(payload()); await p;
@@ -233,4 +233,108 @@ test('pure context predicate exceptions fail closed and never start native work'
   const f = fixture({ isContextCurrent: () => { throw new Error('host boundary unavailable'); } });
   assert.equal(f.controller.open(), false); assert.equal(await f.controller.read(), false); assert.deepEqual(f.calls, ['dispose']);
   assert.equal(f.controller.getState().rows.length, 0); f.controller.dispose();
+});
+
+// Synthetic support/permission metadata only. No device-health success is claimed.
+const iosStatus = (patch = {}) => ({ available: true, enabled: true, healthScaffoldIncluded: true, healthInvocationEnabled: true,
+  consumerMode: 'offline-preview', accountMode: 'off', healthDataRead: false, permissionRequested: false,
+  readAuthorization: 'unknown', reviewStatus: 'UNREVIEWED', ...patch });
+const androidStatus = (patch = {}) => ({ provider: 'health-connect', status: 'available', readExerciseGranted: false, reviewStatus: 'UNREVIEWED', ...patch });
+test('default OFF also refuses support check without touching native', async () => {
+  const c = create(); assert.equal(await c.checkAvailability(), false); assert.equal(c.getState().availability, null);
+});
+for (const platform of ['ios', 'android']) test('manual status only: no health read or permission prompt for ' + platform, async () => {
+  const f = fixture({ platform }); f.controller.open(); assert.deepEqual(f.calls, []);
+  const p = f.controller.checkAvailability(); await tick();
+  assert.deepEqual(f.calls, platform === 'ios' ? ['availability'] : ['open', 'availability']);
+  assert.deepEqual(f.requests[0].input, {});
+  f.requests[0].resolve(platform === 'ios' ? iosStatus() : androidStatus()); assert.equal(await p, true);
+  const s = f.controller.getState(); assert.equal(s.status, 'availability-returned'); assert.equal(s.rows.length, 0);
+  assert.equal(s.availability.readAuthorization, platform === 'ios' ? 'unknown' : 'required');
+  assert.ok(Object.isFrozen(s.availability)); f.controller.close(); assert.equal(f.controller.getState().availability, null); f.controller.dispose();
+});
+test('HealthKit support and even completed authorization never become read-permission proof', async () => {
+  const f = fixture(); f.controller.open(); const p = f.controller.checkAvailability(); await tick(); f.requests[0].resolve(iosStatus()); await p;
+  const a = f.controller.authorize(); await tick(); assert.deepEqual(f.calls, ['availability', 'open', 'requestAuthorization']);
+  f.requests[1].resolve({ requestCompleted: true, readAuthorization: 'unknown' }); await a;
+  assert.equal(f.controller.getState().availability, null); assert.equal(f.controller.getState().status, 'authorization-returned'); f.controller.dispose();
+});
+test('status DTO allows only fixed fields, capability and permission stay distinct', () => {
+  const raw = iosStatus({ token: 'discard', workouts: ['discard'] }); Object.defineProperty(raw, 'unused', { get() { assert.fail('not read'); } });
+  assert.deepEqual(normalizeStatus(raw, 'ios'), { source: 'apple-healthkit', status: 'available', readAuthorization: 'unknown' });
+  assert.equal(normalizeStatus(iosStatus({ available: false, healthInvocationEnabled: false }), 'ios').status, 'unavailable');
+  assert.equal(normalizeStatus(iosStatus({ enabled: false, healthInvocationEnabled: false }), 'ios').status, 'disabled');
+  assert.equal(normalizeStatus(androidStatus({ readExerciseGranted: true }), 'android').readAuthorization, 'granted');
+  for (const status of ['unavailable', 'provider-update-required']) assert.equal(normalizeStatus(androidStatus({ status }), 'android').readAuthorization, 'unknown');
+});
+for (const patch of [{ available: 'true' }, { enabled: 1 }, { healthScaffoldIncluded: false }, { healthInvocationEnabled: false }, { accountMode: 'on' },
+    { consumerMode: 'account' }, { healthDataRead: true }, { permissionRequested: true }, { readAuthorization: 'granted' }, { reviewStatus: 'READY' }]) {
+  test('invalid iOS support DTO refused: ' + Object.keys(patch)[0], () => assert.throws(() => normalizeStatus(iosStatus(patch), 'ios'), /INVALID_AVAILABILITY/));
+}
+for (const patch of [{ provider: 'samsung' }, { status: 'connected' }, { readExerciseGranted: 'true' }, { reviewStatus: 'READY' },
+    { status: 'unavailable', readExerciseGranted: true }, { status: 'provider-update-required', readExerciseGranted: true }]) {
+  test('invalid Android support DTO refused: ' + JSON.stringify(patch), () => assert.throws(() => normalizeStatus(androidStatus(patch), 'android'), /INVALID_AVAILABILITY/));
+}
+test('status DTO accessors never execute; invalid platform refused', () => {
+  const value = iosStatus(); Object.defineProperty(value, 'available', { get() { assert.fail('getter executed'); } });
+  assert.throws(() => normalizeStatus(value, 'ios'), /INVALID_DTO/); assert.throws(() => normalizeStatus({}, 'web'), /INVALID_PLATFORM/);
+});
+for (const boundary of ['close', 'invalidateContext', 'invalidateSession', 'background', 'dispose']) {
+  for (const result of ['success', 'error']) test('late availability ' + result + ' after ' + boundary + ' is dropped', async () => {
+    const f = fixture(); f.controller.open(); const p = f.controller.checkAvailability(); await tick(); f.controller[boundary]();
+    assert.equal(await p, false); const count = f.states.length;
+    if (result === 'success') f.requests[0].resolve(iosStatus()); else f.requests[0].reject(Error('RAW_PRIVATE'));
+    await tick(); assert.equal(f.states.length, count); assert.equal(f.controller.getState().availability, null); f.controller.dispose();
+  });
+}
+test('invalid status response cannot remain in consumer/UI memory', async () => {
+  const f = fixture(); f.controller.open(); const p = f.controller.checkAvailability(); await tick();
+  f.requests[0].resolve(iosStatus({ readAuthorization: 'granted' })); assert.equal(await p, false);
+  assert.equal(f.controller.getState().status, 'error'); assert.equal(f.controller.getState().availability, null); assert.equal(f.controller.getState().rows.length, 0); f.controller.dispose();
+});
+for (const platform of ['ios', 'android']) test('manual status DOM UX and recheck remain safe: ' + platform, async () => {
+  const env = dom(), f = fixture(), c = install(env, { driver: f.driver, platform, enabled: true });
+  const root = env.document.body.children[0], dialog = root.children[1], [, , check, auth, read, , status, list] = dialog.children;
+  try {
+    c.open(); check.emit('click', { isTrusted: false }); assert.deepEqual(f.calls, []);
+    check.emit('click', { isTrusted: true }); await tick(); assert.equal(check.disabled, true); assert.equal(auth.disabled, true);
+    f.requests[0].resolve(platform === 'ios' ? iosStatus() : androidStatus({ status: 'provider-update-required' })); await tick();
+    assert.equal(check.disabled, false); assert.equal(list.children.length, 0);
+    if (platform === 'ios') { assert.match(status.textContent, /읽기 허용 여부는 알 수 없습니다/); assert.equal(auth.disabled, false); }
+    else { assert.match(status.textContent, /설치 또는 업데이트/); assert.equal(auth.disabled, true); assert.equal(read.disabled, true); }
+    check.emit('click', { isTrusted: true }); await tick();
+    f.requests[1].resolve(platform === 'ios' ? iosStatus({ available: false, healthInvocationEnabled: false }) : androidStatus({ readExerciseGranted: true })); await tick();
+    assert.match(status.textContent, platform === 'ios' ? /사용할 수 없습니다/ : /실제 공유한 기록/);
+    c.close(); assert.equal(status.textContent, ''); assert.equal(c.getState().availability, null);
+  } finally { c.dispose(); }
+});
+
+for (const platform of ['ios', 'android']) test('each manual operation renews native context after idle expiry: ' + platform, async () => {
+  let clock = 0, bindingUntil = -1, opens = 0;
+  const calls = [];
+  const driver = {
+    open: async () => { opens++; bindingUntil = clock + 90000; calls.push('open'); },
+    request: async method => {
+      assert.ok(clock < bindingUntil, 'expired binding must never dispatch a health operation'); calls.push(method);
+      return method === 'readRunningWorkouts' ? (platform === 'ios' ? payload() : android()) : {};
+    },
+    invalidateContext() {}, invalidateSession() {}, background() {}, dispose() {}
+  };
+  const c = create({ platform, driver, enabled: true, now: () => Date.parse('2026-10-29T10:00:00Z') + clock });
+  try {
+    c.open(); assert.equal(await c.read(), true); clock = 90001;
+    assert.equal(await c.read(), true); assert.equal(opens, 2);
+    assert.equal(c.getState().rows.length, 1);
+    assert.deepEqual(calls, ['open', 'readRunningWorkouts', 'open', 'readRunningWorkouts']);
+  } finally { c.dispose(); }
+});
+test('fractional-second native DTO retains valid subsecond exercise interval without equating reported and elapsed duration', () => {
+  const rows = normalize(payload({ workouts: [row({ start: '2026-10-28T10:00:00.100Z', end: '2026-10-28T10:00:00.900Z', durationSeconds: 0.7 })] }), 'ios');
+  assert.equal(rows[0].start, '2026-10-28T10:00:00.100Z'); assert.equal(rows[0].end, '2026-10-28T10:00:00.900Z');
+  assert.equal(rows[0].durationSeconds, 0.7); assert.equal(rows[0].durationKind, 'reported');
+});
+test('Swift serialization source explicitly keeps fractional seconds (source contract, not native runtime)', async () => {
+  const source = await readFile(new URL('../native-templates/ios/NativeHealthPlugin.swift', import.meta.url), 'utf8');
+  assert.match(source, /let formatter = ISO8601DateFormatter\(\)\s+formatter.formatOptions = \[.withInternetDateTime, .withFractionalSeconds\]/);
+  assert.match(source, /"start": formatter.string\(from: workout.startDate\), "end": formatter.string\(from: workout.endDate\)/);
 });

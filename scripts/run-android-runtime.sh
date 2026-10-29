@@ -117,5 +117,7 @@ launch_and_forward
 timeout 150 node scripts/android-runtime-probe.mjs --phase read
 capture_screen
 printf '%s\n' 'Installed Android WebView runtime and same-APK persistence probes passed.'
+# Status-only health ingress check; never requests permission or reads workout records.
+timeout 150 node scripts/android-health-preview-smoke.mjs
 # Separate native UI/store-asset and actual empty-journal JSON export checks, not source regression.
 timeout 240 node scripts/android-native-ui-smoke.mjs --export-json
