@@ -3,6 +3,10 @@ name: Mobile candidate (no signing or store upload)
 on:
   workflow_dispatch:
     inputs:
+      health_candidate:
+        type: boolean
+        description: Explicit opt-in to UNREVIEWED read-only health candidate
+        default: false
       platforms:
         type: choice
         description: Native candidate targets
@@ -88,7 +92,12 @@ jobs:
           path: publisher/www
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Generate isolated Android project
-        run: node scripts/generate-native.mjs --platform android
+        run: |
+          if [ "${{ inputs.health_candidate }}" = "true" ]; then
+            node scripts/generate-health-candidate.mjs --enable-health --platform android
+          else
+            node scripts/generate-native.mjs --platform android
+          fi
       - name: Ensure Android 36 SDK
         run: |
           if [ ! -d "$ANDROID_HOME/platforms/android-36" ] || [ ! -d "$ANDROID_HOME/build-tools/36.0.0" ]; then
@@ -151,7 +160,12 @@ jobs:
           xcrun --sdk iphoneos --show-sdk-version > output/ios-sdk-version.txt
           node --input-type=module -e "import fs from 'node:fs';const x=fs.readFileSync('output/xcode-version.txt','utf8');const s=fs.readFileSync('output/ios-sdk-version.txt','utf8');if(Number(x.match(/Xcode (\d+)/)?.[1]||0)<26||!/^\d+(?:\.\d+)*$/.test(s.trim())||Number(s.split('.')[0])<26)throw Error('Xcode/iOS SDK 26 minimum not met');"
       - name: Generate isolated iOS project
-        run: node scripts/generate-native.mjs --platform ios
+        run: |
+          if [ "${{ inputs.health_candidate }}" = "true" ]; then
+            node scripts/generate-health-candidate.mjs --enable-health --platform ios
+          else
+            node scripts/generate-native.mjs --platform ios
+          fi
       - name: Compile simulator app (not an App Store IPA)
         run: |
           xcodebuild -project ios/App/App.xcodeproj -scheme App -configuration Debug -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath "$RUNNER_TEMP/trainoracle-derived" CODE_SIGNING_ALLOWED=NO 'SWIFT_ACTIVE_COMPILATION_CONDITIONS=DEBUG TRAINORACLE_NATIVE_CI_PROBE' build > output/ios-build.log 2>&1 || { tail -n 100 output/ios-build.log; exit 1; }
