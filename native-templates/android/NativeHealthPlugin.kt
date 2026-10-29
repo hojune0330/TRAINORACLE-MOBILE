@@ -21,13 +21,14 @@ import com.getcapacitor.annotation.ActivityCallback
 import com.getcapacitor.annotation.CapacitorPlugin
 import java.time.Duration
 import java.time.Instant
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 
-/** Opt-in candidate only. No automatic registration, storage or network. */
+/** Disabled scaffold: all ingress drops without evaluating work. SDK candidate bodies are unreachable. */
 @CapacitorPlugin(name = "NativeHealth")
 class NativeHealthPlugin : Plugin() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -39,18 +40,20 @@ class NativeHealthPlugin : Plugin() {
         val u = Uri.parse(bridge.webView.url ?: return false)
         return u.scheme == "https" && u.host == "localhost" && u.port == -1 && u.userInfo == null
     }
+    // P1 FAIL-CLOSED: no verified document/session epoch or main-frame ingress ticket exists.
+    // Do not evaluate work, query SDK, launch UI, or send resolve/reject into a newer document.
+    // There is deliberately NO boolean/JS flag that enables this gate.
+    @Suppress("UNUSED_PARAMETER")
     private fun enter(call: PluginCall, work: suspend () -> Unit) {
-        activity.runOnUiThread {
-            if (!trustedOrigin()) { call.reject("UNTRUSTED_ORIGIN"); return@runOnUiThread }
-            if (!activity.hasWindowFocus()) { call.reject("FOREGROUND_REQUIRED"); return@runOnUiThread }
-            if (busy) { call.reject("BUSY"); return@runOnUiThread }
-            busy = true
-            scope.launch {
-                try { work() }
-                catch (_: SecurityException) { busy = false; call.reject("PERMISSION_REQUIRED") }
-                catch (_: Exception) { busy = false; call.reject("HEALTH_UNAVAILABLE") }
-            }
-        }
+        call.release(bridge)
+    }
+    private fun strictLimit(call: PluginCall): Int? {
+        if (!call.data.has("limit")) return 50
+        val raw = call.data.opt("limit")
+        if (raw !is Number) return null
+        val value = raw.toDouble()
+        if (!value.isFinite() || value % 1.0 != 0.0 || value < 1.0 || value > 100.0) return null
+        return value.toInt()
     }
     private fun client(): HealthConnectClient {
         check(HealthConnectClient.getSdkStatus(context) == HealthConnectClient.SDK_AVAILABLE)
@@ -79,7 +82,7 @@ class NativeHealthPlugin : Plugin() {
     fun requestReadPermission(call: PluginCall) = enter(call) {
         client()
         dialog = AlertDialog.Builder(activity).setTitle("운동 읽기 연결")
-            .setMessage("Health Connect에 공유된 최근 달리기만 미리 봅니다. 삼성 헬스의 모든 기록을 읽는 것은 아닙니다. GPS·경로·메모는 읽지 않습니다. 다음 화면에서 직접 승인하거나 거절할 수 있습니다.")
+            .setMessage("이 후보는 비활성화되어 있습니다. 활성화 검토 시 Health Connect 운동세션 객체를 조회한 뒤 달리기의 허용필드만 사용·표시합니다. 삼성 헬스의 모든 기록을 읽는 것은 아닙니다. 부가필드(메모·제목·경로 등)는 사용·저장·전송하지 않습니다. 다음 화면에서 직접 승인하거나 거절할 수 있습니다.")
             .setNegativeButton("취소") { _, _ -> busy = false; call.reject("USER_CANCELLED") }
             .setPositiveButton("권한 화면 열기") { _, _ ->
                 if (!trustedOrigin()) { busy = false; call.reject("ORIGIN_CHANGED") }
@@ -90,18 +93,11 @@ class NativeHealthPlugin : Plugin() {
         dialog?.show()
     }
     @ActivityCallback
+    @Suppress("UNUSED_PARAMETER")
     private fun healthPermissionResult(call: PluginCall?, result: ActivityResult) {
-        if (call == null) { busy = false; return }
-        scope.launch {
-            try {
-                // Re-query authoritative grants, never infer denial from an empty data query.
-                permissionContract.parseResult(result.resultCode, result.data)
-                val granted = client().permissionController.getGrantedPermissions().containsAll(permissions)
-                reply(call, JSObject().put("status", if (granted) "granted" else "denied")
-                    .put("reviewStatus", "UNREVIEWED"))
-            } catch (_: Exception) { call.reject("PERMISSION_CHECK_FAILED") }
-            finally { busy = false }
-        }
+        // Never deliver a restored/late permission callback through an unbound Capacitor callback id.
+        busy = false
+        call?.release(bridge)
     }
     @PluginMethod
     fun readRecentRunningSessions(call: PluginCall) = enter(call) {
@@ -112,7 +108,9 @@ class NativeHealthPlugin : Plugin() {
         val end = try { Instant.parse(call.getString("endTime")) } catch (_: Exception) {
             busy = false; call.reject("INVALID_RANGE_OR_LIMIT"); return@enter
         }
-        val limit = call.getInt("limit", 50) ?: 50
+        val limit = strictLimit(call) ?: run {
+            busy = false; call.reject("INVALID_RANGE_OR_LIMIT"); return@enter
+        }
         if (!start.isBefore(end) || end.isAfter(now) || start.isBefore(now.minus(Duration.ofDays(28))) ||
             Duration.between(start, end) > Duration.ofDays(7) || limit !in 1..100) {
             busy = false; call.reject("INVALID_RANGE_OR_LIMIT"); return@enter
@@ -122,7 +120,7 @@ class NativeHealthPlugin : Plugin() {
             busy = false; call.reject("PERMISSION_REQUIRED"); return@enter
         }
         dialog = AlertDialog.Builder(activity).setTitle("최근 달리기 미리보기")
-            .setMessage("선택한 최대 7일 범위에서 최대 ${limit}개를 기기 내에서 미리 봅니다. 계정·훈련 기록에 저장하지 않으며 사용자 확인 전 UNREVIEWED 상태입니다.")
+            .setMessage("운동세션 객체 조회 후 선택한 최대 7일 범위의 달리기 허용필드만 최대 ${limit}개 표시하는 비활성 후보입니다. 부가필드는 사용·저장·전송하지 않습니다. 계정·훈련 기록에 저장하지 않으며 사용자 확인 전 UNREVIEWED 상태입니다.")
             .setNegativeButton("취소") { _, _ -> busy = false; call.reject("USER_CANCELLED") }
             .setPositiveButton("읽기") { _, _ ->
                 if (!trustedOrigin()) { busy = false; call.reject("ORIGIN_CHANGED") }
@@ -140,6 +138,8 @@ class NativeHealthPlugin : Plugin() {
                                 recordType = ExerciseSessionRecord::class,
                                 timeRangeFilter = TimeRangeFilter.between(start, end),
                                 ascendingOrder = false, pageSize = 100, pageToken = token))
+                            // Candidate-only defense; actual ingress is disabled until epoch/ticket binding exists.
+                            if (!trustedOrigin() || !activity.lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) throw CancellationException()
                             pages++
                             for (record in response.records) {
                                 scanned++
@@ -159,10 +159,11 @@ class NativeHealthPlugin : Plugin() {
                             }
                             token = response.pageToken
                         } while (!bounded && token != null && pages < 5)
+                        if (!trustedOrigin() || !activity.lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) throw CancellationException()
                         reply(call, JSObject().put("provider", "health-connect").put("reviewStatus", "UNREVIEWED")
-                            .put("sessions", rows).put("bounded", bounded || token != null)
-                            .put("scannedRecords", scanned).put("pagesRead", pages))
-                    } catch (_: SecurityException) { call.reject("PERMISSION_REQUIRED") }
+                            .put("sessions", rows).put("bounded", bounded || token != null))
+                    } catch (cancelled: CancellationException) { call.release(bridge); throw cancelled }
+                    catch (_: SecurityException) { call.reject("PERMISSION_REQUIRED") }
                     catch (_: Exception) { call.reject("READ_FAILED") }
                     finally { busy = false }
                 }
@@ -181,7 +182,7 @@ class HealthPermissionsRationaleActivity : Activity() {
         super.onCreate(savedInstanceState)
         val text = TextView(this)
         text.setPadding(32, 48, 32, 32)
-        text.text = "TrainOracle Health Connect 검토용 후보\n\n사용자가 수동 승인한 운동 읽기 권한만 사용합니다. 삼성 헬스 등 원본 앱이 Health Connect에 공유한 최근 달리기 시간과 출처만 기기 내 미리보기에 사용합니다. GPS·운동 경로·메모·심박·다른 건강정보는 읽지 않습니다. 자동 실행·백그라운드 읽기·건강정보 쓰기·서버 전송·영구 저장은 하지 않습니다. 결과는 사용자 확인 전 UNREVIEWED입니다. Health Connect 설정에서 언제든 권한을 철회할 수 있습니다.\n\n배포 전 실제 앱의 개인정보 처리방침·보관 및 삭제·문의 경로와 이 문구를 함께 검토해야 합니다."
+        text.text = "TrainOracle Health Connect 검토용 후보\n\n사용자가 수동 승인한 운동 읽기 권한만 사용합니다. 현재 건강 호출은 안전 경계 미완성으로 비활성화되어 있습니다. 활성화 전 검토 대상은 원본 앱이 Health Connect에 공유한 운동세션 객체를 조회한 뒤 달리기 시간·출처 등 허용필드만 표시하는 기능입니다. 조회 객체의 메모·제목·경로 등 부가필드는 사용·저장·전송하지 않습니다. 자동 실행·백그라운드 읽기·건강정보 쓰기·서버 전송·영구 저장은 하지 않습니다. 결과는 사용자 확인 전 UNREVIEWED입니다. Health Connect 설정에서 언제든 권한을 철회할 수 있습니다.\n\n배포 전 실제 앱의 개인정보 처리방침·보관 및 삭제·문의 경로와 이 문구를 함께 검토해야 합니다."
         setContentView(text)
     }
 }

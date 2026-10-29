@@ -15,7 +15,7 @@ export function transformHealthBridge(text, { enabled = false } = {}) {
 }
 export function createHealthPlan({ enabled = false, info = {}, entitlements = {}, bridgeSource = '', sources = [] } = {}) {
   optIn(enabled);
-  const plan = { enabled, info: clone(info), entitlements: clone(entitlements), bridgeSource, sources: [...sources], generatedFiles: [], reviewStatus: 'UNREVIEWED' };
+  const plan = { enabled, info: clone(info), entitlements: clone(entitlements), bridgeSource, sources: [...sources], generatedFiles: [], reviewStatus: 'UNREVIEWED', consumerIntegrationReviewed: false, healthDataGate: 'CONTEXT_CONSUMER_NOT_INTEGRATED' };
   if (!enabled) return plan;
   if (Object.keys(entitlements).length || Object.keys(info).some(k => /^NSHealth/.test(k))) throw new Error('Existing health/entitlement configuration requires review');
   if (info.MinimumOSVersion && info.MinimumOSVersion !== '16.0') throw new Error('Expected iOS 16.0');

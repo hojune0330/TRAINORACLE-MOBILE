@@ -18,7 +18,7 @@ async function fixture(t, platform = 'android') {
   await put(root, 'www/index.html', '<html><head></head><body>fixture</body></html>');
   const entries = {}, snapshot = { treeSha256: hash(JSON.stringify(entries)), entries };
   await prepareOutput(join(root, 'www'), { sourceSha: SOURCE_SHA, sourceBefore: snapshot, sourceAfter: snapshot });
-  await put(root, 'native-templates/' + platform + '/NativeHealthPlugin.' + (platform === 'ios' ? 'swift' : 'kt'), platform === 'ios' ? '// UNREVIEWED Swift fixture' : 'package __APP_ID__\n// UNREVIEWED\n@CapacitorPlugin(name = "NativeHealth")\nclass NativeHealthPlugin');
+  await put(root, 'native-templates/' + platform + '/NativeHealthPlugin.' + (platform === 'ios' ? 'swift' : 'kt'), platform === 'ios' ? '// UNREVIEWED Swift fixture' : await readFile(join(WRAPPER_ROOT, 'native-templates/android/NativeHealthPlugin.kt'), 'utf8'));
   return root;
 }
 function runner(root, platform = 'android', mutate = async () => {}) {
@@ -57,7 +57,7 @@ test('default OFF rejects before generation', async t => {
 test('Android plan is confined to fresh native tree and truthful separate metadata', async t => {
   const root = await fixture(t), before = await readFile(join(root, 'www', RECEIPT_FILE));
   const result = await generateHealthCandidate(opts(root), { generateNative: runner(root) });
-  assert.equal(result.reviewStatus, 'UNREVIEWED'); assert.equal(result.nativeCompilation, 'not-executed'); assert.equal(result.agpVersion, '8.13.0'); assert.equal(result.modifiedFiles.length, 5);
+  assert.equal(result.reviewStatus, 'UNREVIEWED'); assert.equal(result.healthScaffoldIncluded, true); assert.equal(result.healthInvocationEnabled, false); assert.equal(result.disabledReason, 'CONTEXT_CONSUMER_NOT_REVIEWED'); assert.equal(result.nativeCompilation, 'not-executed'); assert.equal(result.agpVersion, '8.13.0'); assert.equal(result.modifiedFiles.length, 5);
   assert.deepEqual(await readFile(join(root, 'www', RECEIPT_FILE)), before);
   assert.match(await readFile(join(root, 'android/app/src/main/java/io/trainoracle/app/NativeHealthPlugin.kt'), 'utf8'), /package io.trainoracle.app/);
   await assert.rejects(generateHealthCandidate(opts(root), { generateNative: runner(root) }), /must not exist/);
@@ -156,7 +156,7 @@ test('integration delegates to REAL generateNative before Android health transfo
     return { status: 0 };
   };
   const result = await generateHealthCandidate(opts(root), { nativeDependencies: { runCommand } });
-  assert.deepEqual(calls, ['add', 'sync']); assert.equal(result.reviewStatus, 'UNREVIEWED');
+  assert.deepEqual(calls, ['add', 'sync']); assert.equal(result.reviewStatus, 'UNREVIEWED'); assert.equal(result.healthScaffoldIncluded, true); assert.equal(result.healthInvocationEnabled, false); assert.equal(result.disabledReason, 'CONTEXT_CONSUMER_NOT_REVIEWED');
   const original = JSON.parse(await readFile(join(root, 'output/native-generation-android.json'), 'utf8'));
   assert.equal(original.signingConfigured, false); assert.equal(original.nativeCompilation, 'not-executed');
   assert.match(await readFile(join(root, 'android/app/src/main/AndroidManifest.xml'), 'utf8'), /android:allowBackup="false"/);

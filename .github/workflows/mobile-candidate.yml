@@ -153,12 +153,6 @@ jobs:
           name: mobile-web-${{ github.run_id }}
           path: publisher/www
       - run: npm ci --ignore-scripts --no-audit --no-fund
-      - name: Verify Xcode 26 and iOS 26 SDK or newer
-        run: |
-          mkdir -p output
-          xcodebuild -version > output/xcode-version.txt
-          xcrun --sdk iphoneos --show-sdk-version > output/ios-sdk-version.txt
-          node --input-type=module -e "import fs from 'node:fs';const x=fs.readFileSync('output/xcode-version.txt','utf8');const s=fs.readFileSync('output/ios-sdk-version.txt','utf8');if(Number(x.match(/Xcode (\d+)/)?.[1]||0)<26||!/^\d+(?:\.\d+)*$/.test(s.trim())||Number(s.split('.')[0])<26)throw Error('Xcode/iOS SDK 26 minimum not met');"
       - name: Generate isolated iOS project
         run: |
           if [ "${{ inputs.health_candidate }}" = "true" ]; then
@@ -166,6 +160,12 @@ jobs:
           else
             node scripts/generate-native.mjs --platform ios
           fi
+      - name: Verify Xcode 26 and iOS 26 SDK or newer
+        run: |
+          mkdir -p output
+          xcodebuild -version > output/xcode-version.txt
+          xcrun --sdk iphoneos --show-sdk-version > output/ios-sdk-version.txt
+          node --input-type=module -e "import fs from 'node:fs';const x=fs.readFileSync('output/xcode-version.txt','utf8');const s=fs.readFileSync('output/ios-sdk-version.txt','utf8');if(Number(x.match(/Xcode (\d+)/)?.[1]||0)<26||!/^\d+(?:\.\d+)*$/.test(s.trim())||Number(s.split('.')[0])<26)throw Error('Xcode/iOS SDK 26 minimum not met');"
       - name: Compile simulator app (not an App Store IPA)
         run: |
           xcodebuild -project ios/App/App.xcodeproj -scheme App -configuration Debug -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath "$RUNNER_TEMP/trainoracle-derived" CODE_SIGNING_ALLOWED=NO 'SWIFT_ACTIVE_COMPILATION_CONDITIONS=DEBUG TRAINORACLE_NATIVE_CI_PROBE' build > output/ios-build.log 2>&1 || { tail -n 100 output/ios-build.log; exit 1; }

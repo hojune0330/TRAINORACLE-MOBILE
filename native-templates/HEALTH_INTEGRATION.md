@@ -79,3 +79,19 @@ agent-reach의 Jina Reader 경로로 Apple 공식 문서 내용을 확인했다.
 - https://developer.apple.com/documentation/healthkit/hksamplequery : predicate, 정렬과 limit을 갖는 샘플 조회.
 - https://github.com/ionic-team/capacitor/blob/8.5.3/ios/Capacitor/Capacitor/WebViewDelegationHandler.swift : frameInfo 누락 경계와 기본 탐색 위임 동작.
 - https://github.com/ionic-team/capacitor/blob/8.5.3/ios/Capacitor/Capacitor/CapacitorBridge.swift : public delegation handler 접근과 interceptor 경로.
+
+## 독립 검토 P1/P2 보완 (2026-10-29)
+
+이 절이 위 API 사용 예시보다 우선한다. **현재 실제 웹 consumer는 미통합이며 HealthKit 권한 요청/데이터 조회는 소스 상수 `consumerIntegrationReviewed = false`로 fail-closed이다.** helper opt-in, Info.plist, JS boolean, 임의 accountID로 이 게이트를 켤 수 없다. 가용성은 `enabled: false`, `blockedReason: CONTEXT_CONSUMER_NOT_INTEGRATED`를 표시하고 beginContext/읽기/권한 요청은 막힌다. 웹계정 OFF는 완화책일 뿐 일반 계정 격리 보장이 아니다.
+
+새 `web-adapter/ios-health-context.js`는 iOS 전용 미연결 계약 모듈이다. bootstrap/router/auth에는 연결하지 않았다. Android의 health-context.js와 이름/역할을 공유하지 않는다. 테스트의 `consumerIntegrated: true`와 가짜 native는 합성 fixture 전용 사용이며 네이티브 상수나 실제 계정 인증을 대신하지 못한다. 이 요청에서는 public enable/서명/건강 DB 조회를 수행하지 않았다.
+
+네이티브는 documentEpoch(기존 generation)·contextEpoch·sessionEpoch·lifecycleEpoch, 네이티브 발급 contextToken, 중복 방지 requestId와 활성 요청을 함께 바인딩한다. `beginContext`가 발급한 native snapshot만 요청에 사용한다. requestId/세대는 요청 연속성 경계이지 사용자 인증이나 계정 소유권 증명이 아니다. 임의 JS accountID는 전달하지도, 인증에 쓰지도 않는다.
+
+후속 실제 통합 담당자는 **모든 SPA 화면 이동, 로그인·로그아웃·계정 전환, 관련 store 교체 전에** 소비자 invalidateContext/invalidateSession을 호출하고 ack를 await한 뒤 상태를 전환해야 한다. 로컬 pending은 즉시 STALE_CONTEXT로 닫히고 native gate는 원본 WKFrame 검증 후 control 메시지를 동기 처리해 기존 바인딩/티켓을 무효화한다. 새 화면·새 세션이 안정된 후에만 beginContext를 다시 열어야 한다. popstate/라우터의 이미 완료된 after-hook만 연결하는 것은 불충분하다. bootstrap/실제 router/auth/store 및 결과 적용 지점까지 모두 연결·검토하기 전에는 소스 게이트를 제거하면 안 된다.
+
+동의 직후, HealthKit completion, 실제 resolve/reject 직전 모두 현재 바인딩과 foreground를 확인한다. 오래된 호출은 `releaseCall`/drop하며 새 문서에 reject까지 보내지 않는다. 로컬 소비자는 자체 세대로 낡은 성공/오류 적용을 막고 타임아웃을 처리한다. 네이티브 확인 UI의 정상 취소는 현재 문맥에서만 USER_CANCELLED를 반환하며 읽기 권한은 여전히 unknown이다.
+
+willResignActive는 데이터 조회·앱 자체 동의창을 무효화하고 진행 중 query를 stop한다. 단, HealthKit 시스템 권한 UI의 정상적인 일시 inactive는 permission phase에서 따로 처리한다. 이때 완료 응답은 실제 foreground 복귀까지 보류하고 다시 검사한다. **실제 didEnterBackground는 permission phase도 포함해 모두 무효화한다.** 백그라운드 후 늦은 query 결과는 foreground로 돌아와도 새 화면에 전달하지 않는다. 복귀 시 자동 재조회/자동 재허가는 없다.
+
+추가 실행: `node --test tests/ios-health-context.test.mjs` (합성 JS 및 Swift 소스 불변식 검사). 기존 `node --test scripts/configure-health.test.mjs`도 재실행한다. 새 테스트 역시 Swift compile, WebKit frame 전달, UIKit permission lifecycle, HealthKit 실기기 성공의 증거가 아니다. macOS/Xcode에서 `releaseCall` API/타입과 observer 수명, 실제 권한 UI 일시 inactive/진짜 background, SPA 전환 및 로그인·계정 교체 지연 결과, 같은 문서 동일 URL reload, callback release 동작을 별도 검증해야 한다. 후보 CI의 이전 커밋 결과가 이 변경을 검증하지 않으므로 부모의 새 커밋으로 다시 실행해야 한다.

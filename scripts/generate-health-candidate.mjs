@@ -104,7 +104,7 @@ export async function generateHealthCandidate({ platform, enableHealth = false, 
   await unchanged(); await verifyOutput(join(root, 'www'), SOURCE_SHA);
   await ancestors(output);
   if (JSON.stringify(await tree(output)) !== JSON.stringify(baseOutput) || hash(await readFile(basePath)) !== baseHash) throw Error('Base metadata/output changed');
-  const metadata = { schemaVersion: 1, platform, reviewStatus: 'UNREVIEWED', healthEnabled: true, sourceSha: SOURCE_SHA, webReceiptSha256: receiptHash, baseGenerationSha256: baseHash, nativeCompilation: 'not-executed', runtimeValidation: 'not-executed', deviceValidation: 'not-executed', signingConfigured: false, storeUploadEnabled: false, accountMode: 'off', ...(agpVersion ? { agpVersion } : {}), modifiedFiles: Object.keys(files).sort(), nativeFilesSha256: final };
+  const metadata = { schemaVersion: 1, platform, reviewStatus: 'UNREVIEWED', healthScaffoldIncluded: true, healthInvocationEnabled: false, disabledReason: 'CONTEXT_CONSUMER_NOT_REVIEWED', sourceSha: SOURCE_SHA, webReceiptSha256: receiptHash, baseGenerationSha256: baseHash, nativeCompilation: 'not-executed', runtimeValidation: 'not-executed', deviceValidation: 'not-executed', signingConfigured: false, storeUploadEnabled: false, accountMode: 'off', ...(agpVersion ? { agpVersion } : {}), modifiedFiles: Object.keys(files).sort(), nativeFilesSha256: final };
   await writeFile(metaPath, JSON.stringify(metadata, null, 2) + '\n', { flag: 'wx' });
   return metadata;
 }

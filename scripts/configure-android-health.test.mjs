@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { planAndroidHealth, ANDROID_HEALTH_VERSIONS } from './configure-android-health.mjs';
+import { planAndroidHealth, ANDROID_HEALTH_VERSIONS, parseAndroidHealthLimit } from './configure-android-health.mjs';
 const kotlinTemplate = await readFile(new URL('../native-templates/android/NativeHealthPlugin.kt', import.meta.url), 'utf8');
 const fixture = () => ({
   appId: 'io.trainoracle.app', capacitorVersion: '8.5.3', compileSdk: 36, agpVersion: '8.13.0', kotlinTemplate,
@@ -20,6 +20,8 @@ test('pure plan has five Android-only output files and preserves inputs', () => 
   const f = fixture(), original = structuredClone(f), p = enabled(f);
   assert.deepEqual(f, original);
   assert.equal(Object.keys(p.files).length, 5);
+  assert.equal(p.healthInvocationEnabled, false);
+  assert.equal(p.disabledReason, 'DOCUMENT_SESSION_MAIN_FRAME_BINDING_UNVERIFIED');
   assert.equal(p.reviewStatus, 'UNREVIEWED'); assert.equal(p.nativeCompilation, 'not-executed');
   assert.ok(Object.keys(p.files).every(k => !k.includes('..') && !k.startsWith('/') && !/ios|swift/i.test(k)));
   assert.ok(p.files['app/src/main/java/io/trainoracle/app/NativeHealthPlugin.kt'].startsWith('package io.trainoracle.app'));
@@ -64,7 +66,7 @@ test('does not weaken original permission/backup gate', () => {
 test('source contract: trusted local origin, revocable single read permission, manual native prompts', () => {
   assert.match(kotlinTemplate, /u\.scheme == "https" && u\.host == "localhost" && u\.port == -1 && u\.userInfo == null/);
   assert.match(kotlinTemplate, /HealthPermission\.getReadPermission\(ExerciseSessionRecord::class\)/);
-  assert.ok((kotlinTemplate.match(/getGrantedPermissions\(\)/g) || []).length >= 4);
+  assert.ok((kotlinTemplate.match(/getGrantedPermissions\(\)/g) || []).length >= 3);
   assert.match(kotlinTemplate, /setPositiveButton\("권한 화면 열기"/);
   assert.match(kotlinTemplate, /setPositiveButton\("읽기"/);
   assert.doesNotMatch(kotlinTemplate, /override fun load|override fun handleOnStart|override fun handleOnResume/);
@@ -79,4 +81,38 @@ test('source contract: allowlist DTO with UNREVIEWED provenance and no sensitive
 test('planner cannot write files, launch builds or import existing generator to bypass gates', async () => {
   const code = await readFile(new URL('./configure-android-health.mjs', import.meta.url), 'utf8');
   assert.doesNotMatch(code, /node:fs|node:child_process|writeFile|unlink|generate-native|prepare-web|process\.env|process\.argv/);
+});
+
+// JSON reference fixture tests execute JS only. Native parser coverage below is static source-contract only.
+test('JSON schema reference: only missing limit defaults, raw finite integer 1..100 required', () => {
+  assert.equal(parseAndroidHealthLimit({}), 50);
+  for (const value of [1, 50, 100]) assert.equal(parseAndroidHealthLimit({limit: value}), value);
+  for (const value of [null, undefined, '50', '1.5', 1.5, NaN, Infinity, -Infinity, true, false, [], {}, 0, -1, 101]) assert.throws(() => parseAndroidHealthLimit({limit: value}));
+});
+test('native source contract: raw JSON number validation without getInt coercion', () => {
+  for (const token of ['if (!call.data.has("limit")) return 50', 'call.data.opt("limit")', 'raw !is Number', '!value.isFinite()', 'value % 1.0 != 0.0', 'value < 1.0', 'value > 100.0']) assert.ok(kotlinTemplate.includes(token), token);
+  assert.doesNotMatch(kotlinTemplate, /call\.getInt\(/);
+});
+test('P1 fail-closed source contract: every health method drops unbound calls without evaluating work', () => {
+  const gate = kotlinTemplate.match(/private fun enter\(call: PluginCall, work: suspend \(\) -> Unit\)\s*\{([^}]+)\}/);
+  assert.ok(gate);
+  assert.equal(gate[1].trim(), 'call.release(bridge)');
+  const entrypoints = [...kotlinTemplate.matchAll(/@PluginMethod\s+fun (\w+)\(call: PluginCall\) = enter\(call\)/g)].map(m => m[1]);
+  assert.deepEqual(entrypoints, ['availability', 'requestReadPermission', 'readRecentRunningSessions']);
+  assert.equal((kotlinTemplate.match(/@PluginMethod/g) || []).length, 3);
+  const callback = kotlinTemplate.match(/private fun healthPermissionResult[^]*?\n    }/)[0];
+  assert.ok(callback.includes('call?.release(bridge)'));
+  assert.doesNotMatch(callback, /resolve|reject|scope\.launch|client\(/);
+  assert.equal(planAndroidHealth().healthInvocationEnabled, false);
+  assert.equal(enabled(fixture()).healthInvocationEnabled, false);
+  assert.throws(() => enabled({...fixture(), kotlinTemplate: kotlinTemplate.replace('call.release(bridge)\n    }', 'work()\n    }')}));
+});
+test('P2 source contract: no query-count telemetry or misleading memo-read exclusion', () => {
+  assert.doesNotMatch(kotlinTemplate, /\.put\("(?:scannedRecords|pagesRead)"/);
+  assert.doesNotMatch(kotlinTemplate, /메모는 읽지|메모·심박·다른 건강정보는 읽지/);
+  assert.ok(kotlinTemplate.includes('운동세션 객체'));
+  assert.ok(kotlinTemplate.includes('부가필드'));
+  assert.ok(kotlinTemplate.includes('사용·저장·전송하지 않습니다'));
+  assert.match(kotlinTemplate, /catch \(cancelled: CancellationException\) \{ call\.release\(bridge\); throw cancelled }/);
+  // No native runtime navigation/iframe/permission/lifecycle safety claim follows from these source checks.
 });
