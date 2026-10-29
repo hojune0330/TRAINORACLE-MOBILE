@@ -5,9 +5,15 @@ import { readFile } from 'node:fs/promises';
 const root = new URL('../', import.meta.url);
 const source = await readFile(new URL('web-adapter/bootstrap.js', root), 'utf8');
 const context = { URL, Blob, Uint8Array, btoa, Map, Set, Promise, globalThis: { btoa },
-  Capacitor: { isNativePlatform: () => false }, registerPlugin: name => ({ name }) };
+  Capacitor: { isNativePlatform: () => false }, registerPlugin: name => ({ name }),
+  installOfflineHealthBootstrap: () => assert.fail('health preview must not start in this fixture') };
 vm.createContext(context);
-vm.runInContext(source.replace(/^import .*;\r?\n/m, '').replace(/\bexport /g, '') + '\nglobalThis.api = { MAX_DOCUMENT_BYTES, capabilities, safeDocumentPath, safeExternalURL, validFilename, blobPayload, installAdapter, NativeDocuments };', context);
+// Only the two inspected static imports are injected. Unknown future imports still fail parsing.
+const executableSource = source
+  .replace(/^import \{ Capacitor, registerPlugin \} from '@capacitor\/core';\r?\n/m, '')
+  .replace(/^import \{ installOfflineHealthBootstrap \} from '\.\/health-bootstrap\.js';\r?\n/m, '')
+  .replace(/\bexport /g, '');
+vm.runInContext(executableSource + '\nglobalThis.api = { MAX_DOCUMENT_BYTES, capabilities, safeDocumentPath, safeExternalURL, validFilename, blobPayload, installAdapter, NativeDocuments };', context);
 const api = context.globalThis.api;
 const tick = () => new Promise(resolve => setTimeout(resolve, 10));
 function fixture() {
@@ -150,4 +156,10 @@ test('asynchronous PNG export within activation window survives immediate revoke
   new f.Anchor(href, 'async.png').click(); f.env.URL.revokeObjectURL(href);
   await tick(); assert.equal(f.saves.length, 1);
   assert.deepEqual(Buffer.from(f.saves[0].dataBase64, 'base64'), Buffer.from(bytes)); f.dispose();
+});
+
+test('bootstrap dependencies are explicitly injected and future imports are not silently removed', () => {
+  assert.match(source, /^import \{ installOfflineHealthBootstrap \} from '\.\/health-bootstrap\.js';/m);
+  assert.doesNotMatch(executableSource, /^import /m);
+  assert.throws(() => vm.runInContext('import unknown from "unreviewed";\n' + executableSource, context), /import statement/);
 });
