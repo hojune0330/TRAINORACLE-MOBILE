@@ -1,4 +1,5 @@
 import { Capacitor, registerPlugin } from '@capacitor/core';
+import { installOfflineHealthBootstrap } from './health-bootstrap.js';
 export const MAX_DOCUMENT_BYTES = 32 * 1024 * 1024;
 export const NativeDocuments = registerPlugin('NativeDocuments');
 const TYPES = new Set(['application/json', 'image/png']);
@@ -110,5 +111,12 @@ export function installAdapter(env, plugin) {
 }
 if (typeof window !== 'undefined') {
   window.__NATIVE_CAPABILITIES__ = capabilities(window);
-  if (Capacitor.isNativePlatform()) installAdapter(window, NativeDocuments);
+  if (Capacitor.isNativePlatform()) {
+    installAdapter(window, NativeDocuments);
+    const healthPreviewEnabled = typeof __TRAINORACLE_OFFLINE_HEALTH_PREVIEW__ !== 'undefined' && __TRAINORACLE_OFFLINE_HEALTH_PREVIEW__ === true;
+    if (healthPreviewEnabled) {
+      const nativeHealth = Capacitor.getPlatform() === 'ios' ? registerPlugin('NativeHealth') : null;
+      void installOfflineHealthBootstrap(window, {enabled:true,platform:Capacitor.getPlatform(),native:nativeHealth}).catch(()=>{});
+    }
+  }
 }

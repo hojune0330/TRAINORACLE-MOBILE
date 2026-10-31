@@ -3,6 +3,14 @@ name: Mobile candidate (no signing or store upload)
 on:
   workflow_dispatch:
     inputs:
+      offline_health_preview:
+        type: boolean
+        description: Explicit offline read-only health preview candidate
+        default: false
+      health_candidate:
+        type: boolean
+        description: Explicit opt-in to UNREVIEWED read-only health candidate
+        default: false
       platforms:
         type: choice
         description: Native candidate targets
@@ -53,7 +61,13 @@ jobs:
       - name: Wrapper-only tests (not original source regression)
         run: npm test
       - name: Immutable offline source build and native adapter bundle
-        run: node scripts/prepare-release.mjs --source ../upstream
+        run: |
+          if [ "${{ inputs.offline_health_preview }}" = "true" ]; then
+            test "${{ inputs.health_candidate }}" = "true"
+            node scripts/prepare-release.mjs --source ../upstream --offline-health-preview
+          else
+            node scripts/prepare-release.mjs --source ../upstream
+          fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: mobile-web-${{ github.run_id }}
@@ -88,7 +102,16 @@ jobs:
           path: publisher/www
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Generate isolated Android project
-        run: node scripts/generate-native.mjs --platform android
+        run: |
+          if [ "${{ inputs.health_candidate }}" = "true" ]; then
+            if [ "${{ inputs.offline_health_preview }}" = "true" ]; then
+              node scripts/generate-health-candidate.mjs --enable-health --platform android --enable-offline-preview
+            else
+            node scripts/generate-health-candidate.mjs --enable-health --platform android
+            fi
+          else
+            node scripts/generate-native.mjs --platform android
+          fi
       - name: Ensure Android 36 SDK
         run: |
           if [ ! -d "$ANDROID_HOME/platforms/android-36" ] || [ ! -d "$ANDROID_HOME/build-tools/36.0.0" ]; then
@@ -144,14 +167,23 @@ jobs:
           name: mobile-web-${{ github.run_id }}
           path: publisher/www
       - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Generate isolated iOS project
+        run: |
+          if [ "${{ inputs.health_candidate }}" = "true" ]; then
+            if [ "${{ inputs.offline_health_preview }}" = "true" ]; then
+              node scripts/generate-health-candidate.mjs --enable-health --platform ios --enable-offline-preview
+            else
+            node scripts/generate-health-candidate.mjs --enable-health --platform ios
+            fi
+          else
+            node scripts/generate-native.mjs --platform ios
+          fi
       - name: Verify Xcode 26 and iOS 26 SDK or newer
         run: |
           mkdir -p output
           xcodebuild -version > output/xcode-version.txt
           xcrun --sdk iphoneos --show-sdk-version > output/ios-sdk-version.txt
           node --input-type=module -e "import fs from 'node:fs';const x=fs.readFileSync('output/xcode-version.txt','utf8');const s=fs.readFileSync('output/ios-sdk-version.txt','utf8');if(Number(x.match(/Xcode (\d+)/)?.[1]||0)<26||!/^\d+(?:\.\d+)*$/.test(s.trim())||Number(s.split('.')[0])<26)throw Error('Xcode/iOS SDK 26 minimum not met');"
-      - name: Generate isolated iOS project
-        run: node scripts/generate-native.mjs --platform ios
       - name: Compile simulator app (not an App Store IPA)
         run: |
           xcodebuild -project ios/App/App.xcodeproj -scheme App -configuration Debug -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath "$RUNNER_TEMP/trainoracle-derived" CODE_SIGNING_ALLOWED=NO 'SWIFT_ACTIVE_COMPILATION_CONDITIONS=DEBUG TRAINORACLE_NATIVE_CI_PROBE' build > output/ios-build.log 2>&1 || { tail -n 100 output/ios-build.log; exit 1; }
