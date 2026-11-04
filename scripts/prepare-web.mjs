@@ -133,8 +133,23 @@ export function documentCsp(html) {
   return ["default-src 'self'", "connect-src 'self' blob:", "img-src 'self' data: blob:", "style-src 'self' 'unsafe-inline'", "font-src 'self' data:", "script-src 'self'" + (hashes.size ? ' ' + [...hashes].sort().join(' ') : ''), "worker-src 'self' blob:", "media-src 'self' blob: data:", "frame-src 'none'", "object-src 'none'", "base-uri 'self'", "form-action 'none'"].join('; ');
 }
 
-export function transformHtml(original) {
-  if (!/<head\b[^>]*>/i.test(original) || !/<\/head\s*>/i.test(original)) throw new Error('Generated HTML requires an explicit document head');
+const IMPLICIT_HEAD_GALLERIES = new Set(['games/pet-room-v1/gallery.html', 'games/pet-friends-v2/gallery.html']);
+
+function explicitGalleryDocument(original, sourcePath) {
+  // These pinned public galleries use valid omitted head/body tags. Add only
+  // structural boundaries to generated output; keep every original content byte.
+  // Other fragments or a changed gallery structure remain an error.
+  if (!IMPLICIT_HEAD_GALLERIES.has(sourcePath) || /<\/?(?:head|body)\b/i.test(original)) return null;
+  const document = original.match(/^(<!doctype html><html lang="ko">)(<meta charset="utf-8"><meta name="viewport" content="[^"]+"><title>[^<]+<\/title><style>[\s\S]*?<\/style>)(<main>[\s\S]*)(<\/html>\s*)$/);
+  if (!document) return null;
+  return document[1] + '<head>' + document[2] + '</head><body>' + document[3] + '</body>' + document[4];
+}
+
+export function transformHtml(original, sourcePath = '') {
+  if (!/<head\b[^>]*>/i.test(original) || !/<\/head\s*>/i.test(original)) {
+    original = explicitGalleryDocument(original, sourcePath);
+    if (original === null) throw new Error('Generated HTML requires an explicit document head' + (sourcePath ? ': ' + sourcePath : ''));
+  }
   let html = original.replaceAll(OLD_EMAIL, NEW_EMAIL);
   // Only canonical/OG metadata changes origin. Body and privacy/terms wording stay unchanged.
   html = html.replace(/<(?:meta|link)\b[^>]*>/gi, tag => {
@@ -180,7 +195,7 @@ export async function prepareOutput(outputDir, { sourceSha, sourceBefore, source
   if (!Object.hasOwn(files, 'index.html') || Object.keys(files).length === 0) throw new Error('Build output has no index.html');
   // Validate and calculate all HTML edits before writing anything.
   const changes = {};
-  for (const file of Object.keys(files)) if (/\.html$/i.test(file)) changes[file] = transformHtml(await readFile(join(outputDir, file), 'utf8'));
+  for (const file of Object.keys(files)) if (/\.html$/i.test(file)) changes[file] = transformHtml(await readFile(join(outputDir, file), 'utf8'), file);
   for (const [file, html] of Object.entries(changes)) await writeFile(join(outputDir, file), html);
   const receipt = {
     schemaVersion: 1, verificationScope: 'mobile-build', sourceRegressionGate: 'separate-not-claimed-as-passed',

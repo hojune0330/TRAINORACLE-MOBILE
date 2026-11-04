@@ -145,6 +145,44 @@ test('CSP is first in head, strict, unique, and hashes exact existing inline scr
   assert(transformed.includes('<script>' + inline + '</script>'));
 });
 
+test('only the known implicit-head galleries gain boundaries while content and script bytes stay intact', () => {
+  const script = '\nwindow.gallery = "원본 그림";\n';
+  const original = '<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>그림 보관함</title><style>body{margin:0}</style><main><img src="pets/cat.webp" alt="고양이"></main><script>' + script + '</script></html>\n';
+  for (const sourcePath of ['games/pet-room-v1/gallery.html', 'games/pet-friends-v2/gallery.html']) {
+    const transformed = transformHtml(original, sourcePath);
+    assert.match(transformed, /<head>\n<meta http-equiv="Content-Security-Policy"/);
+    assert.match(transformed, /<\/style><\/head><body><main>/);
+    assert.equal(transformed.match(/<script>([\s\S]*?)<\/script>/)[1], script);
+    assert.equal(transformed.replace(/<meta http-equiv="Content-Security-Policy"[^>]*>/, '').replace('<head>\n', '').replace('</head><body>', '').replace('</body>', ''), original);
+    const preparedAgain = transformHtml(transformed, sourcePath);
+    assert.equal((preparedAgain.match(/<head>/g) || []).length, 1);
+    assert.equal((preparedAgain.match(/<body>/g) || []).length, 1);
+    assert.equal((preparedAgain.match(/http-equiv="Content-Security-Policy"/g) || []).length, 1);
+    assert.equal(documentCsp(preparedAgain), documentCsp(transformed));
+    assert.throws(() => transformHtml(original.replace('<main>', '<section>'), sourcePath), /head/);
+    assert.throws(() => transformHtml(original.replace('<style>', '<head><style>'), sourcePath), /head/);
+  }
+  for (const sourcePath of ['', 'index.html', 'other/gallery.html', 'games/pet-room-v1/../gallery.html']) assert.throws(() => transformHtml(original, sourcePath), /head/);
+});
+
+test('actual output preparation preserves gallery assets and original input while receipting its CSP', async t => {
+  const f = await fixture(t), before = await snapshotSource(f.sourceRoot);
+  await writeFile(join(f.outputDir, 'index.html'), html);
+  await mkdir(join(f.outputDir, 'games', 'pet-room-v1', 'pets'), { recursive: true });
+  const galleryPath = join(f.outputDir, 'games', 'pet-room-v1', 'gallery.html');
+  await writeFile(galleryPath, '<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>그림</title><style>body{margin:0}</style><main>원본 그림</main></html>');
+  const assetPath = join(f.outputDir, 'games', 'pet-room-v1', 'pets', 'cat.webp');
+  const asset = Buffer.from([1, 2, 3, 0, 255]);
+  await writeFile(assetPath, asset);
+  const receipt = await prepareOutput(f.outputDir, { sourceSha: SOURCE_SHA, sourceBefore: before, sourceAfter: await snapshotSource(f.sourceRoot) });
+  assertSourceUnchanged(before, await snapshotSource(f.sourceRoot));
+  assert.deepEqual(await readFile(assetPath), asset);
+  assert(receipt.files['games/pet-room-v1/gallery.html']);
+  assert(receipt.files['games/pet-room-v1/pets/cat.webp']);
+  assert.match(await readFile(galleryPath, 'utf8'), /<head>\n<meta http-equiv="Content-Security-Policy"/);
+  await verifyOutput(f.outputDir);
+});
+
 test('receipt hashes all output, preserves whole source tree proof and disclaims regression', async t => {
   const f = await fixture(t), tree = await snapshotSource(f.sourceRoot);
   await writeFile(join(f.outputDir, 'index.html'), html);
