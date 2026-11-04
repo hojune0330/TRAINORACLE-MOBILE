@@ -147,7 +147,7 @@ jobs:
   ios:
     needs: web
     if: inputs.platforms == 'both' || inputs.platforms == 'ios'
-    runs-on: macos-15
+    runs-on: macos-15-intel
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
     timeout-minutes: 35
