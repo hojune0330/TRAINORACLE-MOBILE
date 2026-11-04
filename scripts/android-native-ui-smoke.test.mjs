@@ -3,11 +3,11 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { ROOT } from './android-runtime-probe.mjs';
-import { EXAMPLE_BUTTON, parseArgs, pngMetadata, changedExample, pngExportCandidates, parseUiXml, centerFromBounds, localSaveControls, nativeSaveStatus, storeScreenshotMetadata, jsonExportMetadata, observedButtonCount, JSON_ROUTE, followJsonRoute, observeNativeHandoff, safeHandoffError } from './android-native-ui-smoke.mjs';
+import { ANALYSIS_HOME_BUTTON, EXAMPLE_BUTTON, parseArgs, pngMetadata, changedExample, pngExportCandidates, parseUiXml, centerFromBounds, localSaveControls, nativeSaveStatus, storeScreenshotMetadata, jsonExportMetadata, observedButtonCount, JSON_ROUTE, followJsonRoute, observeNativeHandoff, safeHandoffError } from './android-native-ui-smoke.mjs';
 
 // Fixtures only: never run the app, source tests, emulator, ADB, network, native
 // compilation, account flows or runSmoke. Importing the CLI has no side effects.
-const home = '- main:\n  - heading "홈" [level=1]\n  - button "운동 분석 예시 보기"\n';
+const home = '- main:\n  - heading "훈련과 기록" [level=1]\n  - button "내 기록 분석"\n';
 const example = '- main:\n  - heading "예시 분석" [level=1]\n  - paragraph: 예시 운동 분석 결과\n  - button "PNG로 저장"\n  - button "닫기"\n';
 const pkg = 'com.google.android.documentsui';
 function node(attrs, children = '') {
@@ -21,7 +21,8 @@ test('CLI preserves PNG mode and permits exactly one optional JSON-export switch
   assert.deepEqual(parseArgs(['--export-png']), { exportPng: true });
   assert.deepEqual(parseArgs(['--export-json']), { exportPng: false, exportJson: true });
   for (const args of [['--phase', 'write'], ['--origin', 'https://example.com'], ['--export-png', '--export-png'], ['--export-json', '--export-png'], ['--export-json', '--export-json']]) assert.throws(() => parseArgs(args));
-  assert.equal(EXAMPLE_BUTTON, '운동 분석 예시 보기');
+  assert.equal(ANALYSIS_HOME_BUTTON, '내 기록 분석');
+  assert.equal(EXAMPLE_BUTTON, '예시');
 });
 test('actual changed UI requires substantial fresh ARIA, not a click or loading indicator', () => {
   assert.equal(changedExample(home, example), true);
@@ -126,7 +127,7 @@ test('JSON route uses separately observed exact buttons and leaves final export 
     assert.equal(observedButtonCount(aria, name), 1);
     return { click: async () => clicked.push(index) };
   });
-  assert.deepEqual(observed, ['홈', '더보기', '백업·복원·휴지통', '내 일지 데이터 내려받기 (JSON)']);
+  assert.deepEqual(observed, ['홈', '더보기', '백업·복원·휴지통', '일지 백업']);
   assert.deepEqual(observed, [...JSON_ROUTE]);
   assert.deepEqual(clicked, [0, 1, 2]);
   assert.equal(typeof final.click, 'function');

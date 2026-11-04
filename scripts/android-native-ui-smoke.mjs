@@ -4,7 +4,8 @@ import { pathToFileURL } from 'node:url';
 import { spawn } from 'node:child_process';
 import { ROOT, assertHostedRuntime, parseAndroidTarget, connectNativePage, isNativePage, connectionErrorCode } from './android-runtime-probe.mjs';
 
-export const EXAMPLE_BUTTON = '운동 분석 예시 보기';
+export const ANALYSIS_HOME_BUTTON = '내 기록 분석';
+export const EXAMPLE_BUTTON = '예시';
 export function parseArgs(args) {
   if (args.length === 0) return { exportPng: false };
   if (args.length === 1 && args[0] === '--export-png') return { exportPng: true };
@@ -38,7 +39,7 @@ export function observedButtonCount(aria, name) {
   }
   return count;
 }
-export const JSON_ROUTE = Object.freeze(['홈', '더보기', '백업·복원·휴지통', '내 일지 데이터 내려받기 (JSON)']);
+export const JSON_ROUTE = Object.freeze(['홈', '더보기', '백업·복원·휴지통', '일지 백업']);
 export async function followJsonRoute(observe) {
   for (let index = 0; index < JSON_ROUTE.length; index++) {
     const button = await observe(JSON_ROUTE[index], index);
@@ -219,6 +220,7 @@ export async function runSmoke({ exportPng = false, exportJson = false } = {}) {
   }
   async function tap(node) { await adbRun(['shell', 'input', 'tap', ...centerFromBounds(node.bounds).map(String)]); }
   try {
+    report.stage = 'native-connection';
     connection = await connectNativePage((await import('playwright-core'))._android, { target, diagnostic: event => { if (diagnostics.length < 100) diagnostics.push(event); } });
     const page = connection.page;
     // Hosted emulator and exact debug package/PID have been verified above.
@@ -227,12 +229,21 @@ export async function runSmoke({ exportPng = false, exportJson = false } = {}) {
     report.displayOverrideApplied = true;
     await page.waitForFunction(() => document.readyState === 'complete', null, { timeout: 15000 });
     if (!isNativePage(page.url())) throw new Error('Unexpected native origin');
+    report.stage = 'home-analysis-entry';
     const home = await page.locator('body').ariaSnapshot({ timeout: 5000 });
     await writeFile(join(output, 'android-ui-home-aria.txt'), home + '\n');
-    const button = page.getByRole('button', { name: EXAMPLE_BUTTON, exact: true });
-    if (await button.count() !== 1 || !await button.isVisible()) throw new Error('Unique actual home example button not available');
+    const button = page.getByRole('button', { name: ANALYSIS_HOME_BUTTON, exact: true });
+    if (await button.count() !== 1 || !await button.isVisible()) throw new Error('Unique actual home analysis button not available');
     report.homeImage = await screenshot('home'); report.homeScreenshot = true;
     await button.click({ timeout: 10000 });
+    report.stage = 'explicit-example-selection';
+    const source = page.getByRole('group', { name: '리포트 자료', exact: true });
+    await source.waitFor({ state: 'visible', timeout: 10000 });
+    const exampleButton = source.getByRole('button', { name: EXAMPLE_BUTTON, exact: true });
+    if (await exampleButton.count() !== 1 || !await exampleButton.isVisible()) throw new Error('Unique actual example source button not available');
+    await exampleButton.click({ timeout: 10000 });
+    await page.waitForFunction(() => document.querySelector('.oracle-report[data-source="example"] [aria-label="리포트 자료"] button[aria-pressed="true"]')?.textContent === '예시', null, { timeout: 10000 });
+    report.stage = 'example-render';
     const deadline = Date.now() + 20000;
     let example = home, previous = '', stable = false;
     while (Date.now() < deadline) {
@@ -246,6 +257,7 @@ export async function runSmoke({ exportPng = false, exportJson = false } = {}) {
     report.exampleChanged = true;
     report.exampleImage = await screenshot('example'); report.exampleScreenshot = true; report.ui = 'passed';
     if (exportPng || exportJson) {
+      report.stage = 'native-export';
       const mode = exportJson ? 'json' : 'png';
       let candidates = exportPng ? pngExportCandidates(example) : [];
       let exportButton;
@@ -331,7 +343,8 @@ export async function runSmoke({ exportPng = false, exportJson = false } = {}) {
     }
   } catch (error) {
     if (report.ui !== 'passed') report.ui = 'failed';
-    report.failure = report.export.status === 'failed' ? 'native-export-unconfirmed' : connectionErrorCode(error);
+    report.failure = report.export.status === 'failed' ? 'native-export-unconfirmed'
+      : ['home-analysis-entry', 'explicit-example-selection', 'example-render'].includes(report.stage) ? 'ui-state-unconfirmed' : connectionErrorCode(error);
     if (report.export.status === 'failed') report.export.stepError = safeHandoffError(error);
     throw new Error('Native UI smoke failed (' + report.failure + ')');
   } finally {
@@ -341,7 +354,7 @@ export async function runSmoke({ exportPng = false, exportJson = false } = {}) {
     await writeFile(join(output, 'android-native-export-handoff.json'), JSON.stringify(handoffEvents, null, 2) + '\n');
     if (connection) await connection.browser.close();
   }
-  if (report.export.status === 'failed') throw new Error('UI passed but requested native document save did not pass; inspect smoke report');
+  if ((exportPng || exportJson) && report.export.status !== 'passed') throw new Error('UI passed but requested native document save did not pass; inspect smoke report');
   console.log('Installed Android UI smoke: ' + report.ui + '; native document export: ' + report.export.status);
   return report;
 }
