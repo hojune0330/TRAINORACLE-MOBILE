@@ -6,6 +6,27 @@ import { ROOT, assertHostedRuntime, parseAndroidTarget, connectNativePage, isNat
 
 export const ANALYSIS_HOME_BUTTON = '내 기록 분석';
 export const EXAMPLE_BUTTON = '예시';
+export async function selectAnalysisExample(page) {
+  const source = page.getByRole('group', { name: '결과 종류', exact: true });
+  await source.waitFor({ state: 'visible', timeout: 10000 });
+  const button = source.getByRole('button', { name: EXAMPLE_BUTTON, exact: true });
+  if (await button.count() !== 1 || !await button.isVisible()) throw new Error('Unique actual example source button not available');
+  await button.click({ timeout: 10000 });
+  await page.waitForFunction(() => {
+    const oracle = document.querySelector('.oracle-explore');
+    return oracle?.querySelector('[aria-label="결과 종류"] button[aria-pressed="true"]')?.textContent === '예시'
+      && oracle.textContent.includes('내 기록을 분석한 결과가 아니에요');
+  }, null, { timeout: 10000 });
+  await page.locator('.oracle-explore__result').waitFor({ state: 'visible', timeout: 10000 });
+}
+export async function returnFromAnalysis(page) {
+  const exit = page.getByRole('navigation', { name: '오라클 메뉴', exact: true })
+    .getByRole('button', { name: '오라클 나가기', exact: true });
+  if (await exit.count() !== 1 || !await exit.isVisible()) throw new Error('Unique actual oracle exit not available');
+  await exit.click({ timeout: 10000 });
+  await page.locator('.oracle-explore').waitFor({ state: 'hidden', timeout: 10000 });
+  await page.getByRole('button', { name: ANALYSIS_HOME_BUTTON, exact: true }).waitFor({ state: 'visible', timeout: 10000 });
+}
 export function parseArgs(args) {
   if (args.length === 0) return { exportPng: false };
   if (args.length === 1 && args[0] === '--export-png') return { exportPng: true };
@@ -233,16 +254,12 @@ export async function runSmoke({ exportPng = false, exportJson = false } = {}) {
     const home = await page.locator('body').ariaSnapshot({ timeout: 5000 });
     await writeFile(join(output, 'android-ui-home-aria.txt'), home + '\n');
     const button = page.getByRole('button', { name: ANALYSIS_HOME_BUTTON, exact: true });
+    await button.waitFor({ state: 'visible', timeout: 10000 });
     if (await button.count() !== 1 || !await button.isVisible()) throw new Error('Unique actual home analysis button not available');
     report.homeImage = await screenshot('home'); report.homeScreenshot = true;
     await button.click({ timeout: 10000 });
     report.stage = 'explicit-example-selection';
-    const source = page.getByRole('group', { name: '리포트 자료', exact: true });
-    await source.waitFor({ state: 'visible', timeout: 10000 });
-    const exampleButton = source.getByRole('button', { name: EXAMPLE_BUTTON, exact: true });
-    if (await exampleButton.count() !== 1 || !await exampleButton.isVisible()) throw new Error('Unique actual example source button not available');
-    await exampleButton.click({ timeout: 10000 });
-    await page.waitForFunction(() => document.querySelector('.oracle-report[data-source="example"] [aria-label="리포트 자료"] button[aria-pressed="true"]')?.textContent === '예시', null, { timeout: 10000 });
+    await selectAnalysisExample(page);
     report.stage = 'example-render';
     const deadline = Date.now() + 20000;
     let example = home, previous = '', stable = false;
@@ -262,6 +279,9 @@ export async function runSmoke({ exportPng = false, exportJson = false } = {}) {
       let candidates = exportPng ? pngExportCandidates(example) : [];
       let exportButton;
       if (exportJson) {
+        report.stage = 'example-return';
+        await returnFromAnalysis(page);
+        report.stage = 'native-export';
         report.export = { mode, status: 'not_reached', reason: 'json-route-not-observed', stage: 'route' };
         exportButton = await followJsonRoute(async (name, index) => {
           report.export.routeStep = index;
@@ -344,7 +364,7 @@ export async function runSmoke({ exportPng = false, exportJson = false } = {}) {
   } catch (error) {
     if (report.ui !== 'passed') report.ui = 'failed';
     report.failure = report.export.status === 'failed' ? 'native-export-unconfirmed'
-      : ['home-analysis-entry', 'explicit-example-selection', 'example-render'].includes(report.stage) ? 'ui-state-unconfirmed' : connectionErrorCode(error);
+      : ['home-analysis-entry', 'explicit-example-selection', 'example-render', 'example-return'].includes(report.stage) ? 'ui-state-unconfirmed' : connectionErrorCode(error);
     if (report.export.status === 'failed') report.export.stepError = safeHandoffError(error);
     throw new Error('Native UI smoke failed (' + report.failure + ')');
   } finally {
