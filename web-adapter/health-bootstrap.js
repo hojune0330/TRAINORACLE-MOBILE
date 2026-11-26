@@ -40,11 +40,13 @@ function readyForeground(env){
     doc.addEventListener('DOMContentLoaded',check);doc.addEventListener('visibilitychange',check);env.addEventListener('pagehide',cancel,{once:true});check();
   });
 }
-export async function installOfflineHealthBootstrap(env,{enabled=false,platform,native,createDriver=createOfflineHealthDriver,installPreview=installOfflineHealthPreview}={}) {
+export async function installOfflineHealthBootstrap(env,{enabled=false,platform,native,saveRow,createDriver=createOfflineHealthDriver,installPreview=installOfflineHealthPreview}={}) {
   if(enabled!==true)return null;
   if(!offlineFrame(env,platform))return null;
   if(!await readyForeground(env)||!offlineFrame(env,platform)||!env.document.body)return null;
   let driver;
-  try {driver=createDriver(env,{platform,native});return installPreview(env,{driver,platform,enabled:true});}
+  // 저장 단추는 부모가 일지 포트를 넘겼을 때만 설치한다(기본은 읽기 전용).
+  const save={...(typeof saveRow==='function'?{saveRow}:{})};
+  try {driver=createDriver(env,{platform,native});return installPreview(env,{driver,platform,enabled:true,...save});}
   catch {try{Promise.resolve(driver?.dispose()).catch(()=>{});}catch{}return null;}
 }
