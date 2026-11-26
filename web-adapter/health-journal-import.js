@@ -310,6 +310,8 @@ export function createHealthJournalSaver({ journal, links = null, platform, now 
     if (intent.kind === 'ATTACH') {
       const existing = entries.find(entry => entry.id === intent.entryId);
       if (!existing || existing.kind !== 'post-session' || existing.savedAt !== intent.expectedSavedAt) return { ok: false, status: 'stale-plan', suspects: 0, linkRecorded: false, message: FAILED_MESSAGE };
+      // 다른 날짜의 일지에 남의 기록 수치를 붙이지 않는다.
+      if (existing.date !== prepared.date) return { ok: false, status: 'attach-refused', suspects: 0, linkRecorded: false, message: FAILED_MESSAGE };
       if (existing.fileObservation !== undefined) return { ok: false, status: 'attach-refused', suspects: 0, linkRecorded: false, message: FAILED_MESSAGE };
       const draft = prepared.draft;
       const merged = {

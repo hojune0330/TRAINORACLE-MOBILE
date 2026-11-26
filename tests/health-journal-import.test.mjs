@@ -327,6 +327,8 @@ test('붙이기는 대상이 어긋나면 거부하고 아무것도 쓰지 않�
   assert.equal(evening.result.status, 'stale-plan'); assert.equal(evening.journal.writes.length, 0); assert.equal(evening.links.store.text, null);
   const fromFile = attempt(existingEntry({ fileObservation: { source: 'FILE_UPLOAD' } }));
   assert.equal(fromFile.result.status, 'attach-refused'); assert.equal(fromFile.journal.writes.length, 0);
+  const otherDay = attempt(existingEntry({ date: '2026-10-27' }));
+  assert.equal(otherDay.result.status, 'attach-refused'); assert.equal(otherDay.journal.writes.length, 0, '다른 날짜의 일지에는 붙이지 않는다');
   const moved = attempt(existingEntry(), { expectedSavedAt: '2026-10-28T11:00:00.000Z' });
   assert.equal(moved.result.status, 'stale-plan'); assert.equal(moved.journal.writes.length, 0);
   const missing = attempt(null);
