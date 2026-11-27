@@ -14,7 +14,7 @@ export const RECEIPT_FILE = 'trainoracle-mobile-receipt.json';
 export const ORIGIN = 'https://trainoracle.io';
 const OLD_ORIGIN = 'https://hojune0330.github.io/TRAINORACLE';
 const OLD_EMAIL = 'hojune0330@gmail.com';
-const NEW_EMAIL = 'hojune.jang@trainoracle.io';
+const NEW_EMAIL = 'io.athlete.time@gmail.com';
 const EXCLUDED_PATHS = Object.freeze(['.git', 'app/node_modules']);
 const isExcludedPath = file => EXCLUDED_PATHS.some(root => file === root || file.startsWith(root + '/'));
 const FEATURES = ['ACCOUNT_JOURNAL', 'SYNC', 'SHARING', 'PLAN_PROPOSALS', 'PLAN_BACKUP', 'PUBLIC_PROFILE', 'PRODUCT_ANALYTICS', 'FEEDBACK_BOARD', 'FILE_ANALYSIS_TCX', 'FILE_ANALYSIS_CSV', 'FILE_ANALYSIS_JSON', 'FILE_ANALYSIS_GPX', 'MINIGAME_PROGRESS'];
