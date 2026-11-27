@@ -124,7 +124,7 @@ test('HTML transforms only contact and canonical/OG origins, retaining legal wor
   const transformed = transformHtml(html);
   assert(transformed.includes('href="https://trainoracle.io/legal/privacy.html"'));
   assert(transformed.includes('content="https://trainoracle.io/"'));
-  assert(transformed.includes('href="mailto:hojune.jang@trainoracle.io"'));
+  assert(transformed.includes('href="mailto:io.athlete.time@gmail.com"'));
   assert(transformed.includes('<p>개인정보 보존 및 이용약관 원문</p>'));
   assert(transformed.includes('<a href="https://hojune0330.github.io/TRAINORACLE/">기존 주소</a>'));
   assert(!transformed.includes('hojune0330@gmail.com'));
