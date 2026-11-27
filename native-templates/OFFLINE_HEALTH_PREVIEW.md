@@ -27,6 +27,7 @@ preview.dispose();
 - 요청 메서드는 `requestAuthorization` 또는 `readRunningWorkouts`뿐이다. 권한 입력은 `{}`, 조회 입력은 UTC ISO `{start,end,limit:100}`이고 클릭 순간 기준 최근 7×24시간이다. 여러 요청은 동시에 보내지 않는다.
 - `open()` UI 진입은 native를 호출하지 않는다. 네이티브 open과 request는 권한/읽기 버튼을 명시적으로 누른 경우에만 실행한다. DOM 이벤트는 `isTrusted===true`만 허용한다. 내보낸 pure controller의 메서드는 테스트/부모 lifecycle용이며 사용자 제스처의 보안 경계가 아니다.
 - entry `건강 기록 미리보기`, native `<dialog>` 내부 권한 요청/최근 7일 읽기/닫기. 모달 API가 없는 환경은 실패 종료한다. 렌더는 `textContent`와 `replaceChildren`만 사용한다.
+- 선택 옵션 `saveRow(row)`를 넘기면 행마다 `일지로 저장` 단추가 붙고, 두 번 눌렀을 때만 그 1건이 일지가 된다(첫 누름은 `한 번 더 누르면 저장`, 15초 뒤 자동 취소). 이 옵션이 없으면 지금과 같은 읽기 전용이며 DOM도 같다. 저장 자체는 `web-adapter/health-journal-import.js`의 저장기가 부모 포트로 수행한다(`native-templates/HEALTH_JOURNAL_IMPORT.md`). 안내 문구도 옵션 유무에 따라 자동 저장 없음/1건 저장으로 달라진다.
 
 ## DTO 경계
 
@@ -56,7 +57,7 @@ preview.dispose();
 - 최초 documentElement의 subtree 및 document childList를 관찰하여 main뿐 아니라 body/documentElement 자체 교체도 감지한다. body/root 분리나 교체는 단순 닫기가 아닌 영구 dispose다. observer를 먼저 disconnect하고 listener/history wrapper/DOM을 정리하며 다시 새 body로 자동 장착하지 않는다. 초기화 변수를 콜백 생성 전에 선언하여 조기 폐기 시 TDZ를 피한다.
 - 제거 후 같은 turn에 재삽입해도 removedNodes에 body/root 또는 그 조상이 있으면 폐기한다. preview root 안의 자체 렌더 mutation은 무시하여 무한 invalidate를 피한다. queued observer가 폐기 후 다시 호출되어도 추가 dispose/재개방을 하지 않는다. 원본의 무관한 timer/배지 갱신도 닫을 수 있는 보수적 정책이다.
 - **MutationObserver는 microtask 시점**이므로 DOM 제거 그 순간을 동기적으로 가로채는 기능은 아니다. 대신 연결 상태를 모든 요청 경계와 알림 직전 및 showModal의 동기 focus 처리 후에 재확인한다. observer 이전 늦은 성공/오류도 적용하지 않으며, observer가 감지하면 보관 중 자료도 지운다. popstate/hashchange도 브라우저 이벤트 시점이다. 이를 진짜 router/auth integration 완료라고 주장하지 않는다.
-- 조작/URL/DOM 변화가 전혀 없는 내부 계정 전환은 추론할 수 없다. 실제 인증 세대와 네이티브 App foreground 이벤트의 부모 연결이 없다. 부모는 계정 변경 전에 invalidateSession, 화면 변경 전에 invalidateContext, 전경 상실 즉시 background를 직접 연결해야 한다. 그 검수 전 account-ON 빌드 사용 금지다.
+- 조작/URL/DOM 변화가 전혀 없는 내부 계정 전환은 추론할 수 없다. 실제 인증 세대와 네이티브 App foreground 이벤트의 부모 연결이 없다. 부모는 계정 변경 전에 invalidateSession, 화면 변경 전에 invalidateContext, 전경 상실 즉시 background를 직접 연결해야 한다. 그 검수 전 account-ON 빌드 사용 금지다. 일지 저장 단추도 같은 경계를 따르며, 미리보기가 닫히면 확인 대기와 결과 문구를 지운다.
 
 ## 검사 범위
 
@@ -68,4 +69,4 @@ node --test tests/offline-health-preview.test.mjs
 
 P2 회귀: body 교체/root 제거 각각에 대해 observer 전후의 늦은 성공·오류, 늦은 native open, 이미 렌더된 자료 제거, 영구 재개방 차단을 추가했다. 수정 전 늦은 성공·오류 회귀 실패를 확인했고 수정 후 기존 39개와 추가 회귀를 검사했다. fake DOM에 documentElement/body 연결·ownerDocument/isConnected를 모델링하지만 실제 브라우저 mutation 스케줄러의 증명은 아니다.
 
-실제 native 또는 browser UI 컴파일/실행, HealthKit/Health Connect 권한·실데이터, 진짜 로그인, OS lifecycle 통합 성공의 근거가 아니다. bootstrap/build wiring은 부모 작업이다. 건강자료 자동 영구저장·일지/통계/분석 ingest·서버 전송 경로는 없다.
+실제 native 또는 browser UI 컴파일/실행, HealthKit/Health Connect 권한·실데이터, 진짜 로그인, OS lifecycle 통합 성공의 근거가 아니다. bootstrap/build wiring은 부모 작업이다. 이 모듈 자체는 건강자료를 저장하지 않는다. 다만 부모가 `saveRow`를 넘긴 경우 그 저장기가 고른 1건을 일지로 저장하며(부모 포트로만), 자동 저장·통계/분석 ingest·서버 전송 경로는 여전히 없다.

@@ -156,35 +156,49 @@ export function createOfflineHealthPreviewController({ driver, platform, enabled
     close: () => invalidate(), invalidateContext: () => invalidate(), invalidateSession: () => invalidate('invalidateSession'),
     background: () => invalidate('background'), dispose: () => { if (disposed) return; disposed = true; invalidate('dispose'); } });
 }
-export function installOfflineHealthPreview(env, { driver, platform, enabled = false } = {}) {
+export function installOfflineHealthPreview(env, { driver, platform, enabled = false, saveRow } = {}) {
   // Default OFF does not even read env/document or install listeners.
   if (enabled !== true) return createOfflineHealthPreviewController();
+  // Optional single-record journal save. Without it the preview stays read-only.
+  if (saveRow !== undefined && typeof saveRow !== 'function') fail('INVALID_SAVE_HANDLER');
+  const saveEnabled = saveRow !== undefined;
+  const CONFIRM_MS = 15000;
   const doc = env.document, body = doc.body, documentRoot = doc.documentElement;
   if (!body || !documentRoot || !body.isConnected) fail('DOCUMENT_UNAVAILABLE');
   const root = doc.createElement('section'), entry = doc.createElement('button'), dialog = doc.createElement('dialog');
   const heading = doc.createElement('h2'), note = doc.createElement('p'), status = doc.createElement('p'), list = doc.createElement('ul');
   const check = doc.createElement('button'), auth = doc.createElement('button'), read = doc.createElement('button'), close = doc.createElement('button');
+  const saveNote = doc.createElement('p'); saveNote.setAttribute('role', 'status');
   root.setAttribute('data-offline-health-preview', ''); entry.type = check.type = auth.type = read.type = close.type = 'button';
   entry.textContent = '건강 기록 미리보기'; heading.textContent = '건강 기록 미리보기 · 미검토';
   entry.setAttribute('style', 'position:fixed;right:12px;bottom:calc(76px + env(safe-area-inset-bottom));z-index:2147483000;max-width:calc(100vw - 24px);padding:10px 14px;border:1px solid currentColor;border-radius:999px;background:Canvas;color:CanvasText;font:inherit;font-size:14px;box-shadow:0 2px 12px #0002;');
   dialog.setAttribute('style', 'box-sizing:border-box;width:min(560px,calc(100vw - 24px));max-height:calc(100dvh - 24px);overflow:auto;border:1px solid currentColor;border-radius:16px;padding:20px;background:Canvas;color:CanvasText;font:inherit;line-height:1.5;');
   list.setAttribute('style', 'padding-left:20px;max-height:50vh;overflow:auto;overflow-wrap:anywhere;');
-  note.textContent = '로그인 없는 검증용 미리보기입니다. 조회한 내용은 일지·통계·분석·서버에 저장하지 않습니다. 기기의 권한 동의는 별도이며, 빈 결과만으로 권한 거절이나 기록 없음을 판단하지 않습니다. 권한 화면에서 돌아오면 미리보기를 다시 열어 조회해 주세요.';
+  note.textContent = saveEnabled
+    ? '로그인 없는 검증용 미리보기입니다. 조회한 내용은 일지·통계·분석·서버로 자동 저장하지 않습니다. 아래에서 한 기록의 저장 단추를 두 번 누르면 그 1건만 일지가 되고, 기존 일지의 메모·스티커는 바꾸지 않습니다. 기기의 권한 동의는 별도이며, 빈 결과만으로 권한 거절이나 기록 없음을 판단하지 않습니다.'
+    : '로그인 없는 검증용 미리보기입니다. 조회한 내용은 일지·통계·분석·서버에 저장하지 않습니다. 기기의 권한 동의는 별도이며, 빈 결과만으로 권한 거절이나 기록 없음을 판단하지 않습니다. 권한 화면에서 돌아오면 미리보기를 다시 열어 조회해 주세요.';
   check.textContent = '기기 지원·권한 상태 확인';
   auth.textContent = '권한 요청'; read.textContent = '최근 7일 달리기 읽기'; close.textContent = '닫기';
   dialog.setAttribute('aria-label', '건강 기록 미리보기'); dialog.setAttribute('aria-modal', 'true'); dialog.setAttribute('role', 'dialog');
   if (typeof dialog.showModal !== 'function' || typeof dialog.close !== 'function') fail('MODAL_UNAVAILABLE');
   dialog.hidden = true; status.setAttribute('role', 'status');
-  dialog.append(heading, note, check, auth, read, close, status, list); root.append(entry, dialog);
+  dialog.append(heading, note, check, auth, read, close, status, list);
+  if (saveEnabled) dialog.append(saveNote);
+  root.append(entry, dialog);
   const foreground = () => doc.visibilityState === 'visible';
   const messages = { idle: '수동으로 권한을 요청하거나 기록을 읽으세요.', loading: '요청 중 · 미검토', unreviewed: '조회 결과 미검토 · 최대 100건 · 전체 이력 아님',
     'authorization-returned': '권한 화면이 반환되었습니다. 읽기 허용 여부를 확정하지 않습니다.', cancelled: '요청이 취소되었습니다.', error: '미리보기를 표시할 수 없습니다.', timeout: '요청 시간이 초과되었습니다. 다시 열어 주세요.' };
   // Initialize every cleanup dependency before exposing context callbacks. No TDZ on disposal.
   let controller = null, observer = null, disposed = false;
+  let pendingRow = -1, pendingTimer = null, savingRow = false, renderedEpoch = -1;
   const removers = [];
+  function clearPending() {
+    if (pendingTimer !== null) clearTimeout(pendingTimer);
+    pendingTimer = null; pendingRow = -1;
+  }
   function disposeInstallation() {
     if (disposed) return;
-    disposed = true; observer?.disconnect();
+    disposed = true; observer?.disconnect(); clearPending();
     for (const remove of removers.reverse()) remove();
     controller?.dispose(); root.remove();
   }
@@ -194,23 +208,56 @@ export function installOfflineHealthPreview(env, { driver, platform, enabled = f
         documentRoot.isConnected && body.isConnected && root.isConnected && root.ownerDocument === doc && body.contains(root)) return true;
     disposeInstallation(); return false;
   }
-  controller = createOfflineHealthPreviewController({ driver, platform, enabled: true, isForeground: foreground, isContextCurrent: contextCurrent, onChange(state) {
+  const runSave = row => {
+    if (savingRow) return;
+    savingRow = true; saveNote.textContent = '저장하는 중…'; render(controller.getState());
+    Promise.resolve().then(() => saveRow(row)).then(result => {
+      savingRow = false;
+      const message = typeof result === 'string' ? result : result && typeof result.message === 'string' ? result.message : '';
+      saveNote.textContent = message.slice(0, 200);
+      if (!disposed) render(controller.getState());
+    }, () => {
+      savingRow = false; saveNote.textContent = '일지를 저장하지 못했습니다. 기기 저장 공간을 확인해 주세요.';
+      if (!disposed) render(controller.getState());
+    });
+  };
+  function render(state) {
+    if (state.epoch !== renderedEpoch) { renderedEpoch = state.epoch; clearPending(); }
     list.replaceChildren(); status.textContent = state.visible ? (state.status === 'availability-returned' ? healthAvailabilityMessage(state.availability) : messages[state.status] || '') : '';
     const unavailable = state.availability && state.availability.status !== 'available';
     check.disabled = state.busy; auth.disabled = read.disabled = state.busy || !!unavailable;
-    if (!state.visible) { if (dialog.open && typeof dialog.close === 'function') dialog.close(); dialog.hidden = true; return; }
+    if (!state.visible) { saveNote.textContent = ''; if (dialog.open && typeof dialog.close === 'function') dialog.close(); dialog.hidden = true; return; }
     if (!contextCurrent()) return;
     dialog.hidden = false;
     if (!dialog.open && typeof dialog.showModal === 'function') { try { dialog.showModal(); } catch { controller?.invalidateContext(); return; } }
     // showModal can synchronously run host focus handlers that replace/remove our DOM.
     if (!contextCurrent()) return;
-    for (const row of state.rows) {
+    for (let index = 0; index < state.rows.length; index++) {
+      const row = state.rows[index];
       const item = doc.createElement('li'), distance = row.distanceStatus === 'not-provided' ? '거리 미제공' : `거리 ${row.distanceMeters} m`;
       const sourceName = row.source === 'apple-healthkit' ? '애플 건강' : '헬스 커넥트';
       item.textContent = `${new Date(row.start).toLocaleString('ko-KR')} ~ ${new Date(row.end).toLocaleString('ko-KR')} | ${sourceName}${row.sourcePackage ? ' / ' + row.sourcePackage : ''} | ${row.durationSeconds}초 (${row.durationKind === 'elapsed' ? '경과시간' : '제공시간'}) | ${distance} | 미검토`;
+      if (saveEnabled) {
+        // Two explicit taps; the second one saves only this row. No default action.
+        const save = doc.createElement('button'); save.type = 'button';
+        save.textContent = pendingRow === index ? '한 번 더 누르면 저장' : '일지로 저장';
+        save.disabled = state.busy || savingRow;
+        save.setAttribute('aria-label', `건강 기록 ${index + 1}번을 일지로 저장`);
+        save.addEventListener('click', event => {
+          if (event.isTrusted !== true || disposed || savingRow) return;
+          if (pendingRow !== index) {
+            clearPending(); pendingRow = index;
+            pendingTimer = setTimeout(() => { pendingTimer = null; pendingRow = -1; if (!disposed) render(controller.getState()); }, CONFIRM_MS);
+            render(controller.getState()); return;
+          }
+          clearPending(); runSave(row);
+        });
+        item.append(' ', save);
+      }
       list.append(item);
     }
-  } });
+  }
+  controller = createOfflineHealthPreviewController({ driver, platform, enabled: true, isForeground: foreground, isContextCurrent: contextCurrent, onChange(state) { render(state); } });
   const listen = (target, type, handler, capture = false) => { target.addEventListener(type, handler, capture); removers.push(() => target.removeEventListener(type, handler, capture)); };
   const manual = action => event => { if (event.isTrusted === true) action(); };
   listen(entry, 'click', manual(() => controller.open()));
